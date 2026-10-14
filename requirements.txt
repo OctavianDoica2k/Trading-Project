@@ -1,0 +1,7 @@
+MetaTrader5>=5.0.45
+numpy>=1.26
+fastapi>=0.110
+uvicorn>=0.29
+websockets>=12
+python-dotenv>=1.0
+pywebpush>=2.0

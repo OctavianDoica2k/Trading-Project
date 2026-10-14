@@ -1,0 +1,281 @@
+/* ================================================================================== */
+/* Aspectul paginii. Tema e închisă (fundal închis, text deschis).                      */
+/* Selectori: "#nume" = elementul cu id="nume"; ".nume" = elementele cu class="nume".  */
+/* ================================================================================== */
+
+/* Paleta de culori, definită o singură dată ca „variabile CSS” (--nume). */
+/* Se folosesc cu var(--nume); app.js le citește și pentru culorile chartului. */
+:root {
+  /* fundalul paginii / al panourilor / culoarea marginilor */
+  --bg: #0f1218;
+  --panel: #161b24;
+  --border: #252c38;
+  /* textul principal / textul secundar (etichete, explicații) */
+  --text: #d6dbe4;
+  --muted: #7d8696;
+  /* verde (preț în creștere) / roșu (preț în scădere) */
+  --up: #26a69a;
+  --down: #ef5350;
+  /* galben (ask) / albastru (bid, butoane) / mov (alarme) */
+  --ask: #f0b429;
+  --accent: #4c8dff;
+  --alert: #c77dff;
+}
+/* box-sizing: border-box = lățimea unui element include marginea interioară (padding) și chenarul. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+/* Pagina e o coloană: bara de sus + zona charturilor, care ocupă restul înălțimii. */
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+/* Bara de sus: elementele trec pe rândul următor (wrap) dacă nu încap. */
+header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+/* Câmpul de simbol (textul apare mereu cu majuscule). */
+#symbol {
+  width: 120px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 600 14px/1 inherit;
+  text-transform: uppercase;
+}
+/* Butoanele de timeframe; cel selectat are clasa "on" (chenar albastru). */
+.tfs { display: flex; gap: 2px; }
+.tfs button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font: 600 12px/1 inherit;
+}
+.tfs button:hover { color: var(--text); }
+.tfs button.on { color: var(--text); border-color: var(--accent); background: rgba(76, 141, 255, .12); }
+/* Zona de cotație: fiecare valoare are deasupra o etichetă mică (.lbl). */
+.quote { display: flex; gap: 22px; align-items: flex-end; flex-wrap: wrap; }
+.px, .stat { display: flex; flex-direction: column; }
+.lbl { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+/* Prețurile bid/ask: font mare, cu cifre de lățime egală (tabular-nums), ca să nu „sară” la schimbare. */
+.px span:last-child {
+  font: 600 22px/1.1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  transition: color .15s;
+}
+.stat span:last-child { font: 500 14px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+/* Clase de culoare folosite în mai multe locuri (prețuri, indicii, stări). */
+.up { color: var(--up); }
+.down { color: var(--down); }
+#status.on { color: var(--up); }
+#status.off { color: var(--down); }
+/* Zona charturilor ocupă tot spațiul rămas; lumânările iau ~70% din înălțime, ticurile restul. */
+main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pane { position: relative; min-height: 0; }
+#candles { flex: 3; }
+.tickpane { flex: 1.3; border-top: 1px solid var(--border); }
+/* Titlul chartului de ticuri, suprapus peste colțul din stânga sus; nu interceptează mouse-ul. */
+.panetitle {
+  position: absolute; top: 6px; left: 12px; z-index: 1;
+  color: var(--muted); font-size: 11px; pointer-events: none;
+}
+#ticks { width: 100%; height: 100%; display: block; }
+
+/* ---------- Alarme ---------- */
+/* Butonul 🔔 din bara de sus și bulina cu numărul de alarme active (.badge). */
+.alertbtn {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; cursor: pointer; font: 600 12px/1 inherit;
+  display: inline-flex; gap: 6px; align-items: center;
+}
+.alertbtn:hover { border-color: var(--alert); }
+.badge {
+  background: var(--alert); color: #10131a; border-radius: 9px;
+  padding: 2px 6px; font-size: 11px; min-width: 18px; text-align: center;
+}
+/* Fără alarme active, bulina devine gri. */
+.badge.zero { background: var(--border); color: var(--muted); }
+
+.panel {
+  /* Fereastră plutitoare centrată pe zona chartului (fără scala de prețuri din dreapta). */
+  /* position: fixed = rămâne pe loc pe ecran; z-index: 20 = deasupra charturilor. */
+  position: fixed; z-index: 20;
+  /* Centrul ferestrei = mijlocul zonei fără scala de prețuri (--axis-w e setată de alerts.js). */
+  top: 50%; left: calc((100vw - var(--axis-w, 70px)) / 2);
+  /* translate(-50%, -50%) mută fereastra cu jumătate din propria mărime, ca să fie exact centrată. */
+  transform: translate(-50%, -50%);
+  width: 370px; max-width: calc(100vw - var(--axis-w, 70px) - 24px);
+  max-height: calc(100vh - 48px);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .55);
+  /* Dacă conținutul e mai înalt decât fereastra, apare bara de derulare. */
+  display: flex; flex-direction: column; overflow-y: auto;
+  padding: 0 16px 16px;
+}
+/* Fără această regulă, display: flex de mai sus ar anula atributul hidden. */
+.panel[hidden] { display: none; }
+/* Titlul ferestrei: rămâne vizibil sus la derulare (sticky) și are cursor de mutare. */
+.panelhead {
+  position: sticky; top: 0; background: var(--panel); z-index: 1;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 0 10px; margin-bottom: 4px;
+  cursor: move; user-select: none; touch-action: none;
+  border-bottom: 1px solid var(--border);
+}
+/* margin-left: auto împinge butonul ✕ la capătul din dreapta. */
+.panelhead .iconbtn { margin-left: auto; }
+.draghint { color: var(--muted); font-size: 10px; }
+.panelhead h2 { margin: 0; font-size: 15px; }
+.iconbtn {
+  background: transparent; border: 0; color: var(--muted);
+  font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 4px;
+}
+.iconbtn:hover { color: var(--text); background: var(--bg); }
+
+/* Formularul: câmpurile unul sub altul, fiecare cu eticheta deasupra. */
+#alertForm { display: flex; flex-direction: column; gap: 12px; }
+#alertForm label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; flex: 1; }
+#alertForm .row { display: flex; gap: 10px; }
+#alertForm input, #alertForm select {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; font: 14px/1.2 inherit; width: 100%; min-width: 0;
+}
+#alertForm input:focus, #alertForm select:focus { outline: none; border-color: var(--accent); }
+#aSymbol { font-weight: 600; }
+/* Rândul cu −, câmpul de preț, + și „Preț curent”. */
+.pricebox { display: flex; gap: 4px; }
+.pricebox input { font-family: ui-monospace, Consolas, monospace !important; flex: 1; }
+.step {
+  width: 36px; flex: none; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font-size: 16px; cursor: pointer;
+}
+/* Două stiluri de buton: .ghost (contur, secundar) și .primary (albastru plin, acțiunea principală). */
+.ghost {
+  background: transparent; color: var(--accent);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; cursor: pointer; font: 600 12px/1 inherit; white-space: nowrap;
+}
+.ghost:hover { border-color: var(--accent); }
+.primary {
+  background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+  padding: 10px 14px; cursor: pointer; font: 600 13px/1 inherit;
+}
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* Textele explicative mici de sub câmpuri. */
+.hint { font-size: 11px; color: var(--muted); min-height: 14px; }
+.tip { font-size: 11px; color: var(--muted); }
+.tip b { color: var(--alert); font-weight: 600; }
+
+/* Chart în modul „alegere nivel”: cursor de tragere lângă linia de alarmă */
+/* touch-action: none = pe telefon, atingerea chartului nu mai derulează pagina (putem trage linia). */
+#candles.editing { touch-action: none; }
+#candles.nearline, #candles.dragging { cursor: ns-resize; }
+#candles.dragging * { cursor: ns-resize !important; }
+/* Caseta galbenă de avertizare (SMTP neconfigurat). */
+.warn {
+  background: rgba(240, 180, 41, .1); border: 1px solid rgba(240, 180, 41, .35);
+  color: var(--ask); border-radius: 6px; padding: 8px 10px; font-size: 12px;
+}
+.warn[hidden] { display: none; }
+.warn code { color: var(--text); }
+/* Mesajele de sub formular: verde (ok) sau roșu (eroare). */
+.msg { font-size: 12px; min-height: 16px; }
+.msg.ok { color: var(--up); }
+.msg.err { color: var(--down); }
+.muted { color: var(--muted); font-weight: 400; }
+
+/* Caseta „Notificări pe acest dispozitiv” și eticheta de stare (.pill): verde activă, roșu blocată. */
+.pushbox {
+  margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  display: flex; flex-direction: column; gap: 8px; background: var(--bg);
+}
+.pushhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; }
+.pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: var(--border); color: var(--muted); }
+.pill.on { background: rgba(38, 166, 154, .18); color: var(--up); }
+.pill.off { background: rgba(239, 83, 80, .15); color: var(--down); }
+/* Lista alarmelor: fiecare alarmă e un card cu bandă mov în stânga (verde după declanșare). */
+.listhead { margin: 18px 0 8px; font-weight: 600; font-size: 12px; }
+.alertlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.alertlist .empty { color: var(--muted); font-size: 12px; }
+.alert {
+  border: 1px solid var(--border); border-left: 3px solid var(--alert);
+  border-radius: 6px; padding: 8px 10px; background: var(--bg);
+}
+.alert.triggered { border-left-color: var(--up); opacity: .75; }
+.atop { display: flex; align-items: center; gap: 10px; }
+.asym { font-weight: 700; cursor: pointer; }
+.asym:hover { text-decoration: underline; }
+.aprice { font-family: ui-monospace, Consolas, monospace; font-weight: 600; flex: 1; }
+.ameta, .anote { font-size: 11px; color: var(--muted); margin-top: 3px; word-break: break-word; }
+/* Nota se ascunde dacă e goală. */
+.anote:empty { display: none; }
+.alert.triggered .ameta:first-of-type { color: var(--up); }
+
+/* Mesajele plutitoare de la declanșarea alarmelor: jos, centrate, deasupra a tot (z-index 30). */
+.toasts {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+  z-index: 30; display: flex; flex-direction: column; gap: 8px;
+  width: min(420px, calc(100% - 32px));
+}
+.toast {
+  background: var(--panel); border: 1px solid var(--alert); border-radius: 8px;
+  padding: 12px 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  display: flex; flex-direction: column; gap: 2px; cursor: pointer;
+  animation: pop .25s ease-out;
+}
+.toast span { color: var(--muted); font-size: 12px; }
+/* Animația de apariție: urcă 12px și trece din transparent în vizibil. */
+@keyframes pop { from { transform: translateY(12px); opacity: 0; } }
+
+/* ---------- Telefon ---------- */
+/* Regulile de mai jos se aplică doar pe ecrane cu lățimea de cel mult 640px. */
+@media (max-width: 640px) {
+  header { padding: 8px 12px; gap: 8px; }
+  /* Controalele pe un singur rând; butoanele de timeframe se derulează orizontal, fără bară vizibilă. */
+  .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
+  #symbol { width: 92px; flex: none; font-size: 13px; padding: 6px; }
+  .tfs { overflow-x: auto; flex: 1; scrollbar-width: none; }
+  .tfs::-webkit-scrollbar { display: none; }
+  .tfs button { padding: 6px 7px; flex: none; }
+  /* Pe telefon butonul de alarme arată doar 🔔 și numărul (textul „Alarme” se ascunde). */
+  .alertbtn { flex: none; padding: 6px 8px; gap: 4px; }
+  .alertbtn .btntxt { display: none; }
+  /* Cotația pe o grilă de 3 coloane. */
+  .quote {
+    width: 100%; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 10px;
+  }
+  .px span:last-child { font-size: 18px; }
+  .stat span:last-child { font-size: 12px; }
+  .lbl { font-size: 9px; }
+  #candles { flex: 2.2; }
+  .tickpane { flex: 1; }
+  /* Telefon: panou jos, lăsând libere chartul de sus și scala de prețuri din dreapta */
+  .panel {
+    top: auto; bottom: 0; left: 0; right: var(--axis-w, 64px);
+    transform: none; width: auto; max-width: none; max-height: 56vh;
+    border-radius: 12px 12px 0 0; border-bottom: 0; padding: 0 12px 16px;
+  }
+  .panelhead { cursor: default; padding: 10px 0 8px; }
+  .draghint { display: none; }
+  #alertForm { gap: 9px; }
+  #alertForm .row { gap: 8px; }
+  #alertForm input, #alertForm select { font-size: 16px; } /* fără zoom automat pe iOS */
+  .step { width: 42px; }
+  .primary { flex: 1; }
+}

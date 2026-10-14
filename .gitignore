@@ -1,0 +1,7 @@
+.env
+alerts.json
+alerts.tmp
+__pycache__/
+vapid_private.pem
+push_subscriptions.json
+push_subscriptions.tmp

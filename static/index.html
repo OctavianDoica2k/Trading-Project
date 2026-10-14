@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- ================================================================================== -->
+<!-- Structura paginii. Aspectul vine din style.css, comportamentul din fișierele .js.  -->
+<!-- Fiecare element important are un id="..." prin care îl găsește JavaScript-ul.        -->
+<!-- ================================================================================== -->
+<html lang="ro">
+<head>
+<!-- Codificarea textului (diacritice corecte) și adaptarea la ecranul telefonului. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus Live Chart</title>
+<!-- Foaia de stil. Serverul adaugă automat ?v=... la adresă ca browserul să ia mereu versiunea nouă. -->
+<link rel="stylesheet" href="/static/style.css">
+<!-- Biblioteca de chart TradingView „lightweight-charts”, versiunea fixă 4.2.0, încărcată de pe internet (unpkg). -->
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<!-- ===== Bara de sus: controale + cotația curentă ===== -->
+<header>
+  <div class="controls">
+    <!-- Câmpul de simbol; list="symbols" îl leagă de lista de sugestii de mai jos (completată de app.js). -->
+    <input id="symbol" list="symbols" value="EURUSD" spellcheck="false" autocomplete="off">
+    <datalist id="symbols"></datalist>
+    <!-- Aici app.js creează butoanele de timeframe (1s, 5s, ..., D1). -->
+    <div id="tfs" class="tfs"></div>
+    <!-- Butonul care deschide fereastra de alarme; #alertCount = numărul de alarme active. -->
+    <button id="alertBtn" class="alertbtn" title="Alarme de preț">🔔<span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
+  </div>
+  <!-- Cotația: fiecare valoare are un id pe care app.js îl actualizează la fiecare tic. -->
+  <div class="quote">
+    <div class="px"><span class="lbl">BID</span><span id="bid">—</span></div>
+    <div class="px"><span class="lbl">ASK</span><span id="ask">—</span></div>
+    <div class="stat"><span class="lbl">Spread</span><span id="spread">—</span></div>
+    <div class="stat"><span class="lbl">Ultimul tic (server)</span><span id="ticktime">—</span></div>
+    <div class="stat"><span class="lbl">Ticuri/s</span><span id="tps">0</span></div>
+    <div class="stat"><span class="lbl">Stare</span><span id="status" class="off">deconectat</span></div>
+  </div>
+</header>
+<!-- ===== Zona principală: cele două charturi ===== -->
+<main>
+  <!-- Chartul de lumânări (desenat de lightweight-charts în acest element). -->
+  <section id="candles" class="pane"></section>
+  <!-- Chartul de ticuri, desenat de app.js pe <canvas>. -->
+  <section class="pane tickpane">
+    <div class="panetitle">Ticuri (bid / ask) — ultimele <span id="tickcount">0</span></div>
+    <canvas id="ticks"></canvas>
+  </section>
+</main>
+<!-- ===== Fereastra de alarme (ascunsă până apeși 🔔; atributul hidden o ascunde) ===== -->
+<aside id="alertPanel" class="panel" role="dialog" aria-label="Alarme de preț" hidden>
+  <!-- Titlul: pe desktop, trăgând de el muți fereastra. -->
+  <div class="panelhead">
+    <h2>Alarme de preț</h2>
+    <span class="draghint">trage de aici</span>
+    <button id="alertClose" class="iconbtn" aria-label="Închide">✕</button>
+  </div>
+  <!-- Formularul de creare a unei alarme (trimis de alerts.js prin form.onsubmit). -->
+  <form id="alertForm" autocomplete="off">
+    <div class="row">
+      <!-- Simbolul e completat automat cu simbolul chartului (readonly = nu se poate edita). -->
+      <label>Simbol<input id="aSymbol" readonly></label>
+      <!-- Pe ce preț se urmărește alarma: bid sau ask. -->
+      <label>Preț pe
+        <select id="aSide"><option value="bid">Bid</option><option value="ask">Ask</option></select>
+      </label>
+    </div>
+    <label>Preț țintă
+      <!-- data-dir = direcția butoanelor −/+ (citită de alerts.js). -->
+      <div class="pricebox">
+        <button type="button" class="step" data-dir="-1">−</button>
+        <input id="aPrice" type="number" inputmode="decimal" step="any" required>
+        <button type="button" class="step" data-dir="1">+</button>
+        <button type="button" id="aNow" class="ghost">Preț curent</button>
+      </div>
+      <!-- #aHint: „↑ peste prețul curent cu N puncte”, scris de alerts.js. -->
+      <small id="aHint" class="hint"></small>
+      <small class="tip">Trage <b>linia mov</b> de pe chart sau dă click pe chart ca să alegi nivelul.</small>
+    </label>
+    <label>E-mail pentru notificare
+      <input id="aEmail" type="email" inputmode="email" placeholder="nume@exemplu.com">
+    </label>
+    <label>Notă (opțional)<input id="aNote" maxlength="200" placeholder="ex: rezistență zilnică"></label>
+    <!-- Avertisment afișat doar dacă serverul nu are e-mailul configurat. -->
+    <div id="smtpWarn" class="warn" hidden>
+      SMTP nu e configurat: alarma apare în pagină, dar e-mailul nu se trimite. Completează fișierul <code>.env</code> (vezi <code>.env.example</code>) și repornește serverul.
+    </div>
+    <!-- type="submit" trimite formularul; type="button" e un buton obișnuit (nu trimite formularul). -->
+    <div class="actions">
+      <button type="submit" class="primary">Adaugă alarmă</button>
+      <button type="button" id="aTest" class="ghost">Trimite e-mail de test</button>
+    </div>
+    <!-- Mesaje de confirmare / eroare (scrise de showMsg din alerts.js). -->
+    <div id="aMsg" class="msg"></div>
+  </form>
+  <!-- Secțiunea de notificări push pentru acest dispozitiv (gestionată de push.js). -->
+  <div class="pushbox">
+    <div class="pushhead">
+      <span>Notificări pe acest dispozitiv</span>
+      <span id="pushState" class="pill">—</span>
+    </div>
+    <div class="actions">
+      <button type="button" id="pushToggle" class="ghost">Activează notificări</button>
+      <button type="button" id="pushTest" class="ghost" hidden>Trimite notificare de test</button>
+    </div>
+    <small id="pushHint" class="hint"></small>
+  </div>
+  <!-- Lista alarmelor, construită de alerts.js (funcția render). -->
+  <div class="listhead">Alarmele tale</div>
+  <ul id="alertList" class="alertlist"></ul>
+</aside>
+<!-- Containerul pentru mesajele plutitoare („toast”) afișate la declanșarea unei alarme. -->
+<div id="toasts" class="toasts"></div>
+<!-- Scripturile, în ordinea obligatorie: alerts.js și push.js folosesc variabile definite în app.js. -->
+<script src="/static/app.js"></script>
+<script src="/static/alerts.js"></script>
+<script src="/static/push.js"></script>
+</body>
+</html>
