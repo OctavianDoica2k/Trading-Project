@@ -1,16 +1,38 @@
 # Nexus Live Chart
 
-Chart live cu prețurile din MetaTrader 5 (FBS), actualizat la nivel de tic (timestamp la milisecundă),
-cu alarme de preț care trimit e-mail. Merge pe desktop și pe telefon (din browser).
+Chart live cu prețuri actualizate la nivel de tic (timestamp la milisecundă), cu alarme de preț
+care trimit e-mail. Merge pe desktop și pe telefon (din browser).
+
+Sursa prețurilor se alege cu `PRICE_SOURCE` în `.env`:
+- `ctrader`: **cTrader Open API**, prin internet. Nu are nevoie de niciun program de trading deschis.
+- `mt5`: terminalul **MetaTrader 5** (ex. FBS), care trebuie să fie pornit și logat pe PC (doar Windows).
 
 ## Cerințe
-- Windows, cu terminalul **FBS MT5** pornit și logat
 - Python 3.10+
+- Pentru `ctrader`: un cont cTrader (merge și un cont **demo**, gratuit) și o aplicație Open API aprobată
+- Pentru `mt5`: Windows, cu terminalul MT5 pornit și logat
 
 ```bash
 pip install -r requirements.txt
+python ctrader_setup.py     # doar pentru ctrader, o singură dată (vezi mai jos)
 python server.py
 ```
+
+Cu `mt5`, orele din MT5 (ora serverului brokerului) sunt convertite automat în UTC, comparând
+cel mai recent tic cu ora reală. Dacă piața e închisă la pornire, ora serverului se poate fixa
+cu `MT5_UTC_OFFSET_HOURS` în `.env` (ex. `3` pentru FBS vara, `2` iarna).
+
+## Configurare cTrader (o singură dată)
+1. Intră pe https://openapi.ctrader.com/apps cu cTrader ID-ul tău și creează o aplicație.
+   Aprobarea aplicației poate dura puțin.
+2. Copiază **Client ID** și **Secret** în `.env` (vezi `.env.example`):
+   `CTRADER_CLIENT_ID=...` și `CTRADER_CLIENT_SECRET=...`
+3. La aplicație apasă **Playground**, alege scope **accounts** (doar citire) și **Get token**.
+4. Rulează `python ctrader_setup.py` și lipește Access token și Refresh token. Scriptul îți arată
+   conturile, îl alegi pe cel pentru prețuri și verifică un preț live.
+
+Tokenul se salvează în `ctrader_token.json` și **se reînnoiește automat** înainte să expire (~30 de zile).
+Dacă vreodată e revocat, repeți pașii 3–4.
 
 La pornire, serverul afișează adresele:
 - pe acest PC: http://127.0.0.1:8000
@@ -23,7 +45,7 @@ La pornire, serverul afișează adresele:
 - Alegi prețul țintă, bid sau ask, adresa de e-mail și o notă. Direcția (peste/sub) se stabilește automat
   față de prețul curent.
 - Alarmele sunt verificate **pe server, la fiecare tic**, deci funcționează și cu pagina închisă,
-  cât timp `server.py` și MT5 rulează. Se salvează în `alerts.json`.
+  cât timp `server.py` rulează. Se salvează în `alerts.json`.
 - La declanșare: e-mail, plus notificare în pagină (cu sunet) dacă pagina e deschisă.
 
 ### Configurare e-mail
@@ -34,11 +56,34 @@ La pornire, serverul afișează adresele:
 
 Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te avertizează).
 
+## Istoric și export CSV
+- Timeframe-uri: 1s, 5s, 15s, 30s (construite din ticuri), M1, M5, M15, M30, H1, H4, D1, W1.
+- De la M1 în sus, chartul se deschide cu cel puțin un an de lumânări (cel mult 10.000; la M1–M30
+  asta înseamnă mai puțin de un an). Când derulezi chartul spre stânga, lumânările mai vechi se
+  încarcă automat, până la capătul istoricului brokerului.
+- Cu `mt5`, terminalul păstrează cel mult „Max bars in chart” lumânări pe timeframe (implicit 100.000,
+  adică ~3 luni de M1). Pentru perioadele mai vechi, lumânările M1/M5 se construiesc din ticuri
+  (identice cu cele din MT5, dar mai lent). Ca să le iei direct din MT5: Tools → Options → Charts →
+  Max bars in chart = Unlimited, apoi repornești terminalul.
+- Butonul **💾 Export CSV** din dreapta sus: alegi simbolul, timeframe-ul (sau **ticuri** bid/ask),
+  data de start și data de final (zile întregi, în ora ta locală). Fișierul se scrie pe PC-ul cu serverul,
+  în `exporturi_csv/<SIMBOL>/<SIMBOL>_<TIMEFRAME>_<START>_<FINAL>.csv`
+  (ex. `exporturi_csv/EURUSD/EURUSD_M1_2025-10-15_2026-10-15.csv`); la final apare și un link de descărcare.
+- Coloane: `time_utc,open,high,low,close,volume` (volum = număr de ticuri), la ticuri `time_utc,bid,ask`.
+  Orele din CSV sunt în **UTC**.
+- Durate orientative (MT5, EURUSD): un an de H1 – o secundă; un an de M1 – câteva minute; o zi de
+  ticuri ~220.000 de rânduri (un an de ticuri: zeci de milioane de rânduri, durează mult). Cu cTrader,
+  ticurile vin în pagini limitate de server, deci exporturile de ticuri sunt mai lente.
+
 ## Fișiere
-- `server.py`: conexiunea MT5, WebSocket-ul de prețuri, API-ul pentru alarme
+- `server.py`: WebSocket-ul de prețuri către pagini, istoricul pentru chart, API-ul pentru alarme
+- `ctrader.py`: conexiunea cu cTrader Open API (prețuri live, istoric, reconectare, reînnoirea tokenului)
+- `mt5feed.py`: sursa de prețuri din terminalul MetaTrader 5 (aceleași funcții ca `ctrader.py`)
+- `ctrader_setup.py`: configurarea inițială a tokenului și a contului
 - `alerts.py`: salvarea și verificarea alarmelor, trimiterea e-mailurilor
 - `push.py`: notificările push (cheia VAPID în `vapid_private.pem`, dispozitivele în `push_subscriptions.json`)
-- `static/`: interfața (chart de lumânări, chart de ticuri, panoul de alarme)
+- `static/`: interfața (chart de lumânări, chart de ticuri, panoul de alarme, exportul CSV în `export.js`)
+- `exporturi_csv/`: fișierele CSV exportate (câte un subfolder pentru fiecare simbol)
 
 ## Notificări push (Windows / Android)
 - În fereastra de alarme: **Notificări pe acest dispozitiv → Activează notificări** și permite în browser.
@@ -51,6 +96,12 @@ Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te 
 - iPhone: întâi Share → Add to Home Screen, apoi activezi notificările din aplicația de pe ecranul principal.
 
 ## De reținut
-- Rata de actualizare e cea a feed-ului FBS: un tic nou apare doar când brokerul trimite o cotație nouă.
+- Prețurile sunt cele ale brokerului sursei alese (cTrader sau MT5), deci pot diferi ușor între ele.
+- Rata de actualizare e cea a feed-ului brokerului: un tic nou apare doar când brokerul trimite o cotație nouă.
+- Orele sunt afișate în ora locală a dispozitivului.
+- La timeframe-urile sub un minut (1s–30s), istoricul se construiește din ticuri. Pe 15s/30s, într-o piață
+  foarte activă, pot apărea mai puține lumânări la deschidere; restul se completează live.
+- Dacă se pierde legătura cu sursa de prețuri (cTrader sau terminalul MT5), serverul se reconectează
+  singur, iar pagina afișează starea și își reîncarcă istoricul la revenire.
 - Cu `HOST=0.0.0.0` (implicit), oricine din rețeaua ta locală poate deschide pagina și seta alarme.
   Pune `HOST=127.0.0.1` în `.env` dacă vrei acces doar de pe PC.

@@ -36,7 +36,7 @@ import ssl
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 # EmailMessage: construiește un e-mail (antete + conținut) în formatul standard.
 from email.message import EmailMessage
 # formataddr: „Nume <adresa>”; formatdate: data în formatul cerut de e-mail;
@@ -49,12 +49,11 @@ from pathlib import Path
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-# Transformă un moment în milisecunde (cum vine de la MT5) în text „2026-10-14 10:45:00.123”.
-def fmt_server_time(msc: int) -> str:
-    # Timpul MT5 e ora serverului, codificată „ca UTC”.
-    # (De aceea folosim tz=timezone.utc: obținem exact ora afișată în MetaTrader, nu ora locală.
-    #  [:-3] taie ultimele 3 cifre din microsecunde, rămânând milisecundele.)
-    return datetime.fromtimestamp(msc / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+# Transformă un moment în milisecunde (cum vine de la cTrader) în text „2026-10-14 10:45:00.123”.
+def fmt_tick_time(msc: int) -> str:
+    # Timpul cTrader e UTC real; fromtimestamp() fără fus orar îl afișează în ora locală a PC-ului.
+    # ([:-3] taie ultimele 3 cifre din microsecunde, rămânând milisecundele.)
+    return datetime.fromtimestamp(msc / 1000).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 # =====================================================================================
@@ -171,9 +170,10 @@ class Mailer:
 # =====================================================================================
 #  AlertStore – lista alarmelor
 # -------------------------------------------------------------------------------------
-#  E folosită din DOUĂ fire de execuție în același timp:
+#  E folosită din mai multe fire de execuție în același timp:
 #   - firul web (când creezi / ștergi o alarmă din pagină);
-#   - firul MT5 (când verifică ticurile noi, în check()).
+#   - bucla asyncio a serverului (când verifică ticurile noi, în check());
+#   - firul care trimite e-mailul (când salvează rezultatul trimiterii).
 #  De aceea orice acces la self.alerts se face sub `with self.lock:`.
 # =====================================================================================
 class AlertStore:
@@ -208,7 +208,7 @@ class AlertStore:
         with self.lock:
             return [dict(a) for a in reversed(self.alerts)]
 
-    # Simbolurile care au cel puțin o alarmă activă (le urmărește firul MT5 permanent).
+    # Simbolurile care au cel puțin o alarmă activă (prețurile lor sunt urmărite permanent).
     def active_symbols(self) -> set[str]:
         with self.lock:
             return {a["symbol"] for a in self.alerts if a["status"] == "active"}
@@ -253,7 +253,7 @@ class AlertStore:
             self._save()
             return True
 
-    # Apelată de firul MT5 cu fiecare lot de ticuri noi ale unui simbol.
+    # Apelată de server cu fiecare lot de ticuri noi ale unui simbol.
     # Verifică FIECARE tic (nu doar ultimul), ca să nu ratăm o atingere scurtă a prețului
     # care a apărut și a dispărut între două interogări.
     def check(self, symbol: str, ticks: list[list]):
@@ -298,7 +298,7 @@ class AlertStore:
                 except Exception as e:  # noqa: BLE001
                     print(f"[ALERT] notificare push eșuată: {e}")
             # 3) E-mailul, într-un fir separat: trimiterea durează câteva secunde și nu vrem să
-            #    blocăm firul MT5 (care trebuie să citească în continuare ticurile).
+            #    blocăm serverul (care trebuie să primească în continuare ticurile).
             if a["email"]:
                 threading.Thread(target=self._email, args=(a,), daemon=True).start()
 
@@ -321,7 +321,7 @@ class AlertStore:
             f"Țintă:         {price} ({alert['side']}, "
             f"{'peste' if alert['direction'] == 'above' else 'sub'})\n"
             f"Preț atins:    {hit}\n"
-            f"Ora tic (MT5): {fmt_server_time(alert['trigger_tick'])}\n"
+            f"Ora tic:       {fmt_tick_time(alert['trigger_tick'])}\n"
             f"Ora locală:    {alert['triggered_at'].replace('T', ' ')}\n"
         )
         if alert["note"]:

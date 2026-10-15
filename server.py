@@ -1,26 +1,30 @@
 """
-Server de prețuri live din MetaTrader 5 (FBS) -> browser, prin WebSocket.
-
-Terminalul MT5 trebuie să fie pornit și logat. Pornire:
+Server de prețuri live -> browser, prin WebSocket. Sursa prețurilor se alege cu PRICE_SOURCE în .env:
+  - ctrader : cTrader Open API, prin internet, fără niciun program deschis
+              (configurare o singură dată: python ctrader_setup.py);
+  - mt5     : terminalul MetaTrader 5 (ex. FBS), care trebuie să fie pornit și logat pe PC.
+Pornire:
     python server.py            -> http://127.0.0.1:8000  (și de pe telefon, din aceeași rețea)
 """
 # =====================================================================================
 #  CE FACE ACEST FIȘIER (pe scurt)
 # -------------------------------------------------------------------------------------
-#  1. Se conectează la terminalul MetaTrader 5 deschis pe PC (contul FBS).
-#  2. Un fir de execuție separat („thread”) întreabă terminalul la fiecare 10 ms dacă au
-#     apărut ticuri noi (un „tic” = o nouă cotație bid/ask trimisă de broker).
+#  1. Se conectează la sursa de prețuri: cTrader prin internet (vezi ctrader.py) sau terminalul
+#     MT5 de pe PC (vezi mt5feed.py). Ambele oferă aceleași funcții, deci restul codului nu
+#     depinde de sursă.
+#  2. Urmărește prețurile simbolurilor deschise în pagini și ale celor cu alarme active.
+#     Fiecare cotație nouă (un „tic” = o nouă cotație bid/ask) ajunge imediat la server.
 #  3. Ticurile noi sunt trimise instant către toate paginile deschise în browser, printr-o
 #     conexiune WebSocket (o conexiune permanentă, în ambele sensuri, între pagină și server).
 #  4. Tot aici sunt definite adresele API (de ex. /api/alerts) folosite de pagină pentru
 #     alarme de preț, e-mail de test și notificări push.
 #
 #  Biblioteci folosite:
-#   - MetaTrader5 : pachetul oficial Python care „vorbește” cu terminalul MT5.
-#   - numpy       : calcule rapide pe tablouri mari de numere (construirea lumânărilor).
+#   - websockets  : conexiunea cu cTrader (în ctrader.py).
+#   - MetaTrader5 : legătura cu terminalul MT5 (în mt5feed.py, doar cu PRICE_SOURCE=mt5).
 #   - FastAPI     : framework web – definește adresele (rutele) serverului.
 #   - uvicorn     : serverul web propriu-zis, care rulează aplicația FastAPI.
-#   - dotenv      : citește setările din fișierul .env (parole SMTP etc.).
+#   - dotenv      : citește setările din fișierul .env (parole SMTP, date cTrader etc.).
 #   - pydantic    : validează automat datele JSON primite de la pagină.
 # =====================================================================================
 
@@ -31,24 +35,24 @@ Terminalul MT5 trebuie să fie pornit și logat. Pornire:
 # re        : expresii regulate (căutare/înlocuire de text după tipare).
 # socket    : folosit doar ca să aflăm IP-ul PC-ului în rețeaua locală.
 # sys       : acces la consola (stdout/stderr).
-# threading : fire de execuție paralele și „lacăte” (Lock) pentru acces sigur la date comune.
-# time      : pauze (sleep) între interogări.
+# time      : ora curentă, în milisecunde.
 import asyncio
+import csv
 import json
 import os
 import re
 import socket
 import sys
-import threading
 import time
+import uuid
 # asynccontextmanager: permite scrierea codului de pornire/oprire a serverului într-o singură funcție.
 from contextlib import asynccontextmanager
+# datetime: formatarea orelor (UTC) din fișierele CSV exportate.
+from datetime import datetime, timezone
 # Path: lucrul comod cu căi de fișiere (ROOT / "static" etc.).
 from pathlib import Path
 
 # --- Biblioteci externe (instalate cu pip, vezi requirements.txt) ---
-import MetaTrader5 as mt5
-import numpy as np
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -69,188 +73,145 @@ ROOT = Path(__file__).parent
 # pentru că acestea citesc setările (SMTP_HOST etc.) chiar în momentul în care sunt create.
 load_dotenv(ROOT / ".env")
 
-# Modulele proiectului: alarmele + e-mailul (alerts.py) și notificările push (push.py).
+# Modulele proiectului: alarmele + e-mailul (alerts.py), notificările push (push.py)
+# și conexiunea cu cTrader (ctrader.py). mt5feed.py se încarcă doar dacă e folosit (mai jos).
 from alerts import AlertStore, Mailer, valid_email  # noqa: E402 - după load_dotenv
+from ctrader import PERIODS, CTraderError, CTraderFeed, TokenStore  # noqa: E402
 from push import PushService  # noqa: E402
 
 # --- Constante de configurare ---
-POLL_INTERVAL = 0.010   # cât de des interogăm terminalul pentru ticuri noi (secunde)
-HISTORY_BARS = 600      # câte lumânări trimitem la conectare
+HISTORY_BARS = 600      # câte lumânări trimitem la conectare pentru timeframe-urile sub un minut
+# De la M1 în sus trimitem la conectare cel puțin un an de lumânări (an calendaristic întreg),
+# dar cel mult MAX_INITIAL_BARS; restul istoricului se încarcă la derularea chartului spre stânga,
+# câte OLDER_BARS lumânări odată (vezi /api/bars).
+YEAR_S = 366 * 86400
+MAX_INITIAL_BARS = 10_000
+OLDER_BARS = 5000
+RECENT_TICKS = 600      # câte ticuri trimitem pentru chartul de ticuri
+# Pentru lumânările sub un minut cerem ticuri în bucăți (vezi CTraderFeed.ticks); cel mult
+# atâtea bucăți, ca deschiderea chartului să nu dureze prea mult.
+MAX_TICK_PAGES = 12
 
-# Timeframe-uri suportate (secunde). Sub 60s lumânările se construiesc din ticuri.
-# Cheia = durata unei lumânări în secunde (cum o trimite pagina).
-# Valoarea = constanta MT5 corespunzătoare; None înseamnă că MT5 nu are acel timeframe
-# (1s, 5s, 15s, 30s) și construim noi lumânările din ticurile brute.
-TIMEFRAMES = {
-    1: None, 5: None, 15: None, 30: None,
-    60: mt5.TIMEFRAME_M1, 300: mt5.TIMEFRAME_M5, 900: mt5.TIMEFRAME_M15,
-    3600: mt5.TIMEFRAME_H1, 14400: mt5.TIMEFRAME_H4, 86400: mt5.TIMEFRAME_D1,
-}
+# Timeframe-uri suportate (secunde). Sub 60s lumânările se construiesc din ticuri; de la M1 în
+# sus le primim gata calculate de la sursa de prețuri (vezi PERIODS în ctrader.py).
+SUB_MINUTE = (1, 5, 15, 30)
+TIMEFRAMES = set(SUB_MINUTE) | set(PERIODS)
+# Numele timeframe-urilor, folosite în numele fișierelor CSV (0 = ticuri brute bid/ask).
+TF_LABELS = {0: "ticuri", 1: "1s", 5: "5s", 15: "15s", 30: "30s", 60: "M1", 300: "M5", 900: "M15",
+             1800: "M30", 3600: "H1", 14400: "H4", 86400: "D1", 604800: "W1"}
+# Folderul în care se salvează exporturile CSV (câte un subfolder pentru fiecare simbol).
+EXPORT_DIR = ROOT / "exporturi_csv"
 
 # Folderul cu fișierele paginii web (HTML, CSS, JavaScript).
 STATIC = ROOT / "static"
 # Adresa și portul pe care ascultă serverul (pot fi schimbate din .env).
 HOST = os.getenv("HOST", "0.0.0.0")   # 0.0.0.0 = accesibil și de pe telefon din rețeaua locală
 PORT = int(os.getenv("PORT", "8000"))
-
-# Pachetul MetaTrader5 nu e garantat thread-safe: toate apelurile trec prin acest lock.
-# Un „lock” (lacăt) asigură că un singur fir de execuție vorbește cu MT5 la un moment dat:
-# cine vrea să apeleze mt5.* scrie `with mt5_lock:` și așteaptă dacă lacătul e ocupat.
-mt5_lock = threading.Lock()
-
-
-# Pornește (sau repornește) legătura cu terminalul MT5.
-# mt5.initialize() se atașează la terminalul deja deschis și logat; nu are nevoie de parolă.
-# Întoarce True dacă a reușit, False altfel (și afișează motivul).
-def mt5_connect() -> bool:
-    with mt5_lock:
-        if mt5.initialize():
-            return True
-        print(f"[MT5] initialize() a eșuat: {mt5.last_error()}")
-        return False
+# Sursa prețurilor: "ctrader" sau "mt5".
+PRICE_SOURCE = os.getenv("PRICE_SOURCE", "ctrader").strip().lower()
+SOURCE_NAME = "MT5" if PRICE_SOURCE == "mt5" else "cTrader"
 
 
 # =====================================================================================
 #  TickHub – „centrala” de ticuri
 # -------------------------------------------------------------------------------------
 #  Problema: pot fi deschise mai multe pagini (PC, telefon, alt utilizator), fiecare pe alt
-#  simbol. Nu vrem ca fiecare pagină să întrebe singură MT5-ul.
-#  Soluția: un SINGUR fir de execuție (metoda run) citește ticurile pentru toate simbolurile
-#  necesare și le pune în „cozile” (Queue) paginilor abonate la acel simbol.
-#  Fiecare pagină conectată are propria coadă; funcția ws_endpoint (mai jos) scoate mesajele
-#  din coadă și le trimite prin WebSocket.
+#  simbol. Nu vrem ca fiecare pagină să ceară separat prețurile de la sursă.
+#  Soluția: sursa urmărește fiecare simbol O SINGURĂ dată; fiecare tic primit e pus în
+#  „cozile” (Queue) paginilor abonate la acel simbol. Fiecare pagină conectată are propria
+#  coadă; funcția ws_endpoint (mai jos) scoate mesajele din coadă și le trimite prin WebSocket.
 # =====================================================================================
 class TickHub:
-    """Un singur thread citește ticurile din MT5 și le distribuie clienților abonați."""
+    """Distribuie ticurile primite de la sursa de prețuri paginilor abonate."""
 
     def __init__(self):
         # Bucla asyncio a serverului web; e setată la pornire (în lifespan). Avem nevoie de ea
-        # ca să putem pune mesaje în cozi din firul MT5 în mod sigur (call_soon_threadsafe).
+        # ca să putem pune mesaje în cozi din alte fire (ex. firul care trimite e-mailul).
         self.loop: asyncio.AbstractEventLoop | None = None
         # subs: pentru fiecare simbol, mulțimea cozilor paginilor care îl urmăresc.
         # Exemplu: {"EURUSD": {coada_pagina1, coada_pagina2}, "XAUUSD": {coada_pagina3}}
         self.subs: dict[str, set[asyncio.Queue]] = {}
         self.all_queues: set[asyncio.Queue] = set()   # pentru mesaje către toți clienții
         self.watched = lambda: set()                  # simboluri urmărite și fără clienți (alarme)
-        self.on_ticks = None                          # callback(symbol, ticks) în thread-ul MT5
-        # last_msc: pentru fiecare simbol, momentul (în milisecunde) ultimului tic deja trimis.
-        # Așa știm, la următoarea interogare, care ticuri sunt noi.
-        self.last_msc: dict[str, int] = {}
-        # Lacăt pentru subs/all_queues (sunt modificate din firul web și citite din firul MT5).
-        self.subs_lock = threading.Lock()
-        # Semnal de oprire: când e „setat”, bucla din run() se termină.
-        self.stop = threading.Event()
+        self.on_ticks = None                          # callback(symbol, ticks), înaintea paginilor
+        self.on_wanted = None                         # callback(simboluri) – lista de abonări dorită
 
     # O pagină nouă vrea ticurile unui simbol: îi creăm o coadă și o înregistrăm.
     # maxsize=5000: limită ca o pagină blocată să nu umple memoria la nesfârșit.
     def subscribe(self, symbol: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=5000)
-        with self.subs_lock:
-            # setdefault creează mulțimea goală pentru simbol dacă nu există încă.
-            self.subs.setdefault(symbol, set()).add(q)
-            self.all_queues.add(q)
+        # setdefault creează mulțimea goală pentru simbol dacă nu există încă.
+        self.subs.setdefault(symbol, set()).add(q)
+        self.all_queues.add(q)
+        self.sync()
         return q
 
     # Pagina s-a închis: îi ștergem coada. Dacă nimeni nu mai urmărește simbolul,
-    # îl scoatem cu totul, ca firul MT5 să nu-l mai interogheze degeaba.
+    # îl scoatem cu totul, ca sursa să nu-i mai urmărească prețurile degeaba.
     def unsubscribe(self, symbol: str, q: asyncio.Queue):
-        with self.subs_lock:
-            self.all_queues.discard(q)
-            qs = self.subs.get(symbol)
-            if qs:
-                qs.discard(q)
-                if not qs:
-                    del self.subs[symbol]
+        self.all_queues.discard(q)
+        qs = self.subs.get(symbol)
+        if qs:
+            qs.discard(q)
+            if not qs:
+                del self.subs[symbol]
+        self.sync()
+
+    # Spune sursei de prețuri ce simboluri trebuie urmărite: cele deschise în pagini plus cele
+    # cu alarme active (trebuie urmărite chiar dacă nicio pagină nu e deschisă).
+    def sync(self):
+        if self.on_wanted:
+            self.on_wanted(set(self.subs) | self.watched())
 
     # Pune un mesaj în cozile paginilor. symbol=None înseamnă „către toate paginile”
     # (folosit pentru evenimente de alarmă, care interesează pe toată lumea).
-    # Rulează în firul web (e apelată prin call_soon_threadsafe), deci poate folosi cozile asyncio.
+    # Rulează doar în bucla asyncio (cozile asyncio nu pot fi atinse din alte fire).
     def _push(self, symbol: str | None, msg: str):
-        with self.subs_lock:
-            # Facem o copie a listei ca să nu ținem lacătul ocupat cât punem mesajele.
-            queues = list(self.all_queues if symbol is None else self.subs.get(symbol, ()))
+        queues = list(self.all_queues if symbol is None else self.subs.get(symbol, ()))
         for q in queues:
             if q.full():          # client lent: aruncăm mesajul cel mai vechi
                 q.get_nowait()
             q.put_nowait(msg)
 
-    # Verifică dacă au apărut ticuri noi pentru UN simbol și le distribuie.
-    # Rulează în firul MT5.
-    def _poll_symbol(self, symbol: str):
-        with mt5_lock:
-            last = self.last_msc.get(symbol)
-            # Prima dată când vedem simbolul: doar reținem momentul ultimului tic existent
-            # (nu retrimitem istoricul – acesta e trimis separat, la conectare, în build_hello).
-            if last is None:
-                tick = mt5.symbol_info_tick(symbol)
-                if tick is not None:
-                    self.last_msc[symbol] = tick.time_msc
-                return
-            # Cerem toate ticurile din secunda ultimului tic încoace și păstrăm doar cele noi,
-            # ca să nu pierdem ticuri când vin mai multe între două interogări.
-            # (copy_ticks_from primește timpul în secunde, de aceea last // 1000; 2000 = maximul
-            #  de ticuri cerute odată; COPY_TICKS_ALL = toate tipurile de ticuri.)
-            ticks = mt5.copy_ticks_from(symbol, last // 1000, 2000, mt5.COPY_TICKS_ALL)
-        if ticks is None or len(ticks) == 0:
-            return
-        # `ticks` e un tablou numpy; filtrăm doar ticurile cu timpul > ultimul trimis.
-        new = ticks[ticks["time_msc"] > last]
-        if len(new) == 0:
-            return
-        # Reținem momentul celui mai nou tic, pentru interogarea următoare.
-        self.last_msc[symbol] = int(new["time_msc"][-1])
-        # Transformăm ticurile într-o listă compactă: [timp_ms, bid, ask] pentru fiecare.
-        data = [[int(t["time_msc"]), float(t["bid"]), float(t["ask"])] for t in new]
+    # Ticuri noi de la sursa de prețuri (apelată în bucla asyncio). data = [[timp_ms, bid, ask], ...]
+    def ticks(self, symbol: str, data: list[list]):
         # Le dăm întâi modulului de alarme (care verifică dacă vreun preț țintă a fost atins).
         if self.on_ticks:
             self.on_ticks(symbol, data)
-        # Apoi le trimitem paginilor. call_soon_threadsafe = „execută _push în firul web,
-        # cât de curând” – singurul mod sigur de a atinge cozile asyncio din alt fir.
-        msg = json.dumps({"type": "ticks", "d": data})
-        self.loop.call_soon_threadsafe(self._push, symbol, msg)
+        # Apoi le trimitem paginilor.
+        self._push(symbol, json.dumps({"type": "ticks", "d": data}))
 
     # Trimite un mesaj (dicționar) către TOATE paginile deschise. Folosit pentru alarme.
     def broadcast(self, msg: dict):
         """Apelabil din orice thread."""
+        # call_soon_threadsafe = „execută _push în bucla asyncio, cât de curând” – singurul mod
+        # sigur de a atinge cozile asyncio din alt fir (ex. firul care trimite e-mailul).
         self.loop.call_soon_threadsafe(self._push, None, json.dumps(msg))
-
-    # Bucla principală a firului MT5: rulează până la oprirea serverului.
-    def run(self):
-        while not self.stop.is_set():
-            # Simbolurile de interogat = cele urmărite de pagini ...
-            with self.subs_lock:
-                symbols = set(self.subs)
-            # ... plus cele cu alarme active (trebuie urmărite chiar dacă nicio pagină nu e deschisă).
-            symbols |= self.watched()
-            # Uităm simbolurile care nu mai interesează pe nimeni (ca la revenire să pornim „curat”).
-            for sym in list(self.last_msc):
-                if sym not in symbols:
-                    del self.last_msc[sym]
-            for sym in symbols:
-                try:
-                    self._poll_symbol(sym)
-                except Exception as e:  # noqa: BLE001 - thread-ul nu trebuie să moară
-                    print(f"[MT5] eroare la {sym}: {e}")
-            # Verificăm periodic că terminalul e încă conectat; dacă nu, încercăm reconectarea.
-            if symbols:
-                with mt5_lock:
-                    ti = mt5.terminal_info()
-                if ti is None:
-                    print("[MT5] conexiune pierdută, reîncerc...")
-                    time.sleep(1)
-                    mt5_connect()
-            # Pauză scurtă (10 ms) între runde, ca să nu încărcăm procesorul inutil.
-            time.sleep(POLL_INTERVAL)
 
 
 # --- Crearea obiectelor principale și legarea lor între ele ---
+# feed    : sursa de prețuri – terminalul MT5 sau cTrader (datele aplicației din .env, tokenul
+#           din ctrader_token.json).
 # hub     : distribuie ticurile.
 # alerts  : alarmele de preț (fișierul alerts.json poate fi schimbat cu variabila ALERTS_FILE).
+if PRICE_SOURCE == "mt5":
+    from mt5feed import MT5Feed  # noqa: E402 - doar pe Windows, cu pachetul MetaTrader5
+    feed = MT5Feed()
+else:
+    feed = CTraderFeed(os.getenv("CTRADER_CLIENT_ID", "").strip(),
+                       os.getenv("CTRADER_CLIENT_SECRET", "").strip(),
+                       TokenStore(Path(os.getenv("CTRADER_TOKEN_FILE", ROOT / "ctrader_token.json"))))
 hub = TickHub()
 alerts = AlertStore(Path(os.getenv("ALERTS_FILE", ROOT / "alerts.json")), Mailer())
-# hub-ul întreabă alarmele ce simboluri trebuie urmărite permanent ...
+# Fiecare tic primit de la sursa de prețuri trece prin hub.
+feed.on_ticks = hub.ticks
+# Paginile află când cade sau revine conexiunea cu sursa (la revenire își reîncarcă istoricul).
+feed.on_status = lambda up: hub.broadcast({"type": "feed", "up": up})
+# hub-ul îi spune sursei de prețuri ce simboluri să urmărească ...
+hub.on_wanted = feed.want
+# ... și întreabă alarmele ce simboluri trebuie urmărite permanent ...
 hub.watched = alerts.active_symbols
-# ... și le trimite fiecare lot de ticuri noi, ca să verifice prețurile țintă.
+# ... și le trimite fiecare tic nou, ca să verifice prețurile țintă.
 hub.on_ticks = alerts.check
 # Când o alarmă se schimbă (declanșare, status e-mail), anunțăm toate paginile deschise.
 alerts.on_change = lambda a: hub.broadcast({"type": "alert", "alert": a})
@@ -272,31 +233,48 @@ def lan_ip() -> str | None:
         return None
 
 
+# Reface periodic lista de abonări: o alarmă declanșată nu mai are nevoie de prețuri.
+async def keep_synced():
+    while True:
+        await asyncio.sleep(5)
+        hub.sync()
+
+
 # „lifespan” = ce se întâmplă la pornirea și la oprirea serverului.
 # Tot ce e înainte de `yield` rulează la pornire; tot ce e după, la oprire.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Fără MT5 aplicația nu are sens, așa că oprim pornirea cu un mesaj clar.
-    if not mt5_connect():
-        raise RuntimeError("Nu mă pot conecta la terminalul MT5. E pornit și logat?")
-    with mt5_lock:
-        acc = mt5.account_info()
-    # Mesaje informative în consolă: contul conectat și adresele la care se deschide pagina.
-    print(f"[MT5] conectat: {acc.server} / {acc.login}" if acc else "[MT5] conectat")
+    # Fără datele cTrader aplicația nu are sens, așa că oprim pornirea cu un mesaj clar.
+    if PRICE_SOURCE == "ctrader":
+        if not feed.client_id or not feed.client_secret:
+            raise RuntimeError("Lipsesc CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET din .env (vezi .env.example)")
+        if not feed.tokens.configured:
+            raise RuntimeError("Lipsește tokenul cTrader. Rulează întâi: python ctrader_setup.py "
+                               "(sau pune PRICE_SOURCE=mt5 în .env ca să folosești terminalul MT5)")
+    elif PRICE_SOURCE != "mt5":
+        raise RuntimeError(f"PRICE_SOURCE necunoscut: {PRICE_SOURCE} (folosește ctrader sau mt5)")
+    print(f"[WEB] sursa prețurilor: {SOURCE_NAME}")
+    hub.loop = asyncio.get_running_loop()
+    # Pornim conexiunea permanentă cu sursa și sincronizarea abonărilor, în fundal.
+    tasks = [asyncio.create_task(feed.run()), asyncio.create_task(keep_synced())]
+    hub.sync()
+    # Așteptăm puțin prima conectare, ca mesajele de mai jos să apară după „conectat”.
+    try:
+        await asyncio.wait_for(feed.ready.wait(), 20)
+    except asyncio.TimeoutError:
+        print(f"[{SOURCE_NAME}] încă neconectat; serverul pornește oricum și reîncearcă în fundal")
+    # Mesaje informative în consolă: adresele la care se deschide pagina.
     print(f"[WEB] pe acest PC:  http://127.0.0.1:{PORT}")
     # (`:=` atribuie și testează în același timp: ip primește rezultatul lui lan_ip().)
     if HOST == "0.0.0.0" and (ip := lan_ip()):
         print(f"[WEB] de pe telefon: http://{ip}:{PORT}  (aceeași rețea Wi-Fi)")
     if not alerts.mailer.configured:
         print("[ALERT] SMTP neconfigurat: alarmele apar în pagină, dar nu se trimit e-mailuri (vezi .env.example)")
-    # Reținem bucla asyncio și pornim firul MT5 (daemon=True: se oprește odată cu programul).
-    hub.loop = asyncio.get_running_loop()
-    threading.Thread(target=hub.run, daemon=True).start()
     yield
-    # La oprire: semnalăm firului MT5 să se oprească și închidem legătura cu terminalul.
-    hub.stop.set()
-    with mt5_lock:
-        mt5.shutdown()
+    # La oprire: oprim conexiunea cu sursa de prețuri.
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # Aplicația web propriu-zisă.
@@ -348,14 +326,12 @@ async def index():
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
-# Lista simbolurilor din contul MT5, pentru sugestiile din câmpul de simbol al paginii.
-# "visible" = cele din Market Watch, "all" = toate simbolurile oferite de broker.
+# Lista simbolurilor din cont, pentru sugestiile din câmpul de simbol al paginii.
+# "visible" = cele afișate/active (Market Watch la MT5), "all" = toate simbolurile brokerului.
 @app.get("/api/symbols")
 async def symbols():
-    with mt5_lock:
-        syms = mt5.symbols_get() or ()
-    visible = [s.name for s in syms if s.visible]
-    return JSONResponse({"visible": visible, "all": [s.name for s in syms]})
+    visible, everything = feed.symbol_names()
+    return JSONResponse({"visible": visible, "all": everything})
 
 
 # ---------- Alarme ----------
@@ -385,8 +361,7 @@ async def list_alerts():
 # Creează o alarmă nouă, după ce verifică datele primite.
 @app.post("/api/alerts")
 async def create_alert(a: AlertIn):
-    # Normalizăm: simbol cu majuscule, latura doar "bid" sau "ask", e-mail fără spații.
-    symbol = a.symbol.strip().upper()
+    # Normalizăm: latura doar "bid" sau "ask", e-mail fără spații.
     side = a.side if a.side in ("bid", "ask") else "bid"
     email = a.email.strip()
     # HTTPException(400, ...) = răspuns de eroare cu mesajul afișat apoi în pagină.
@@ -394,20 +369,27 @@ async def create_alert(a: AlertIn):
         raise HTTPException(400, "Adresă de e-mail invalidă")
     if a.price <= 0:
         raise HTTPException(400, "Preț invalid")
-    with mt5_lock:
-        # symbol_select îl adaugă în Market Watch (altfel MT5 nu dă cotații pentru el).
-        mt5.symbol_select(symbol, True)
-        tick = mt5.symbol_info_tick(symbol)
-        info = mt5.symbol_info(symbol)
-    if tick is None or info is None:
-        raise HTTPException(400, f"Simbol necunoscut: {symbol}")
+    # Numele exact al simbolului la broker (ex. „eurusd” -> „EURUSD”).
+    symbol = feed.resolve(a.symbol.strip())
+    if symbol is None:
+        raise HTTPException(400, f"Simbol necunoscut: {a.symbol.strip().upper()}")
+    try:
+        info = await feed.info(symbol)
+        tick = await feed.quote(symbol)
+    except (CTraderError, ConnectionError, asyncio.TimeoutError) as e:
+        raise HTTPException(503, f"{SOURCE_NAME} indisponibil: {e}") from e
+    if tick is None:
+        raise HTTPException(400, f"Nu am niciun preț pentru {symbol}")
     # Prețul curent pe latura aleasă; din el se deduce direcția alarmei (peste / sub).
-    current = tick.bid if side == "bid" else tick.ask
+    current = tick[1] if side == "bid" else tick[2]
     # Comparăm rotunjit la numărul de zecimale al simbolului (ex. 5 la EURUSD).
-    if round(a.price, info.digits) == round(current, info.digits):
+    if round(a.price, info["digits"]) == round(current, info["digits"]):
         raise HTTPException(400, "Prețul e chiar prețul curent")
     # Nota e limitată la 200 de caractere.
-    return alerts.add(symbol, a.price, side, current, email, a.note.strip()[:200], info.digits)
+    alert = alerts.add(symbol, a.price, side, current, email, a.note.strip()[:200], info["digits"])
+    # Simbolul alarmei trebuie urmărit de acum înainte, chiar fără pagini deschise.
+    hub.sync()
+    return alert
 
 
 # Șterge o alarmă după id (butonul ✕ din listă).
@@ -415,6 +397,7 @@ async def create_alert(a: AlertIn):
 async def delete_alert(alert_id: str):
     if not alerts.delete(alert_id):
         raise HTTPException(404, "Alarma nu există")
+    hub.sync()
     return {"ok": True}
 
 
@@ -503,98 +486,243 @@ async def test_email(t: TestEmailIn):
 
 
 # ---------- Date de chart ----------
-# Construiește lumânări de 1s/5s/15s/30s din ticurile ultimelor HISTORY_BARS intervale.
+# Construiește lumânări de 1s/5s/15s/30s din ticurile bid [(timp_ms, preț), ...] (cronologic).
 # O lumânare = Open (primul preț din interval), High (maximul), Low (minimul), Close (ultimul).
-def candles_from_ticks(symbol: str, tf: int) -> list[dict]:
-    """Lumânări sub-minut construite din istoricul de ticuri (pe bid, ca în MetaTrader)."""
-    with mt5_lock:
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            return []
-        # Intervalul cerut: de la (ultimul tic − tf × 600 secunde) până la ultimul tic.
-        end = tick.time + 1
-        ticks = mt5.copy_ticks_range(symbol, end - tf * HISTORY_BARS, end, mt5.COPY_TICKS_ALL)
-    if ticks is None or len(ticks) == 0:
-        return []
-    # Ignorăm ticurile fără bid (unele ticuri conțin doar ask).
-    ticks = ticks[ticks["bid"] > 0]
-    if len(ticks) == 0:
-        return []
-    bid = ticks["bid"]
-    # Pentru fiecare tic calculăm începutul intervalului din care face parte (în secunde).
-    # Ex. tf=5: ticul de la 10:00:07.300 aparține lumânării care începe la 10:00:05.
-    buckets = (ticks["time_msc"] // 1000 // tf) * tf
-    # Pozițiile unde începe o lumânare nouă: primul tic + fiecare loc unde intervalul se schimbă.
-    starts = np.flatnonzero(np.r_[True, buckets[1:] != buckets[:-1]])
-    # Ultimul tic al fiecărei lumânări = cu unu înainte de începutul următoarei.
-    ends = np.r_[starts[1:] - 1, len(bid) - 1]
-    # reduceat calculează maximul/minimul pe fiecare grup [starts[i], starts[i+1]) dintr-o dată.
-    highs = np.maximum.reduceat(bid, starts)
-    lows = np.minimum.reduceat(bid, starts)
-    # Formatul așteptat de biblioteca de chart din pagină.
-    return [
-        {"time": int(buckets[s]), "open": float(bid[s]), "high": float(h),
-         "low": float(l), "close": float(bid[e])}
-        for s, e, h, l in zip(starts, ends, highs, lows)
-    ]
+# volume = numărul de ticuri din lumânare. limit = câte lumânări (cele mai noi) întoarcem.
+def candles_from_ticks(ticks: list[tuple[int, float]], tf: int, limit: int | None = HISTORY_BARS) -> list[dict]:
+    bars: list[dict] = []
+    for msc, p in ticks:
+        # Începutul intervalului din care face parte ticul (în secunde).
+        # Ex. tf=5: ticul de la 10:00:07.300 aparține lumânării care începe la 10:00:05.
+        t = msc // 1000 // tf * tf
+        b = bars[-1] if bars else None
+        if b and b["time"] == t:
+            b["high"] = max(b["high"], p)
+            b["low"] = min(b["low"], p)
+            b["close"] = p
+            b["volume"] += 1
+        else:
+            bars.append({"time": t, "open": p, "high": p, "low": p, "close": p, "volume": 1})
+    return bars[-limit:] if limit else bars
 
 
-# Pentru M1 și mai mari, MT5 are deja lumânările gata calculate („rates”); doar le citim.
-def candles_from_rates(symbol: str, timeframe: int) -> list[dict]:
-    with mt5_lock:
-        # Ultimele HISTORY_BARS lumânări, începând de la cea curentă (poziția 0).
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, HISTORY_BARS)
-    if rates is None:
-        return []
-    return [
-        {"time": int(r["time"]), "open": float(r["open"]), "high": float(r["high"]),
-         "low": float(r["low"]), "close": float(r["close"])}
-        for r in rates
-    ]
-
-
-# Ultimele `count` ticuri din ultima oră, pentru chartul de ticuri din partea de jos a paginii.
-def recent_ticks(symbol: str, count: int = 600) -> list[list]:
-    """Ultimele ticuri, ca chartul de ticuri să nu pornească gol."""
-    with mt5_lock:
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            return []
-        ticks = mt5.copy_ticks_range(symbol, tick.time - 3600, tick.time + 1, mt5.COPY_TICKS_ALL)
-    if ticks is None:
-        return []
-    # [-count:] = ultimele `count` elemente.
-    ticks = ticks[-count:]
-    return [[int(t["time_msc"]), float(t["bid"]), float(t["ask"])] for t in ticks]
+# Combină ticurile bid și ask (vin separat de la cTrader) în [timp_ms, bid, ask]: la fiecare
+# moment folosim ultimul bid și ultimul ask cunoscute. Întoarce ultimele `count` ticuri.
+def merge_ticks(bid: list[tuple[int, float]], ask: list[tuple[int, float]], count: int) -> list[list]:
+    events = sorted([(t, 0, p) for t, p in bid] + [(t, 1, p) for t, p in ask])
+    b = a = None
+    out: list[list] = []
+    for t, side, p in events:
+        if side == 0:
+            b = p
+        else:
+            a = p
+        if b is None or a is None:
+            continue
+        # Bid și ask schimbate în aceeași milisecundă = un singur tic.
+        if out and out[-1][0] == t:
+            out[-1] = [t, b, a]
+        else:
+            out.append([t, b, a])
+    return out[-count:]
 
 
 # Pregătește primul mesaj („hello”) trimis unei pagini proaspăt conectate:
 # informații despre simbol + istoricul de lumânări + ultimele ticuri.
-# Întoarce None dacă simbolul nu există.
-def build_hello(symbol: str, tf: int) -> dict | None:
-    with mt5_lock:
-        if not mt5.symbol_select(symbol, True):
-            return None
-        info = mt5.symbol_info(symbol)
-        tick = mt5.symbol_info_tick(symbol)
-    if info is None:
-        return None
-    # Alegem sursa lumânărilor: din ticuri (sub un minut) sau din MT5 (M1 și peste).
-    mt_tf = TIMEFRAMES[tf]
-    bars = candles_from_ticks(symbol, tf) if mt_tf is None else candles_from_rates(symbol, mt_tf)
+async def build_hello(symbol: str, tf: int) -> dict:
+    info = await feed.info(symbol)
+    last = await feed.quote(symbol)
+    # Istoricul se termină la ultimul tic (în weekend, la închiderea pieței de vineri).
+    end = (last[0] if last else int(time.time() * 1000)) + 1
+    if tf in PERIODS:
+        # M1 și peste: lumânările vin gata calculate de la sursa de prețuri (cel puțin un an).
+        count = min(-(-YEAR_S // tf), MAX_INITIAL_BARS)
+        bars = await feed.trendbars(symbol, tf, count, end)
+        bid = await feed.ticks(symbol, "BID", end - 3600_000, end, max_pages=1)
+    else:
+        # Sub un minut: le construim din ticurile bid ale ultimelor HISTORY_BARS intervale.
+        bid = await feed.ticks(symbol, "BID", end - tf * HISTORY_BARS * 1000, end, max_pages=MAX_TICK_PAGES)
+        bars = candles_from_ticks(bid, tf)
+    ask = await feed.ticks(symbol, "ASK", end - 3600_000, end, max_pages=1)
     return {
         "type": "hello",
         "symbol": symbol,
         "tf": tf,
         # digits = câte zecimale are prețul (5 la EURUSD, 2 la XAUUSD).
-        "digits": info.digits,
+        "digits": info["digits"],
         # point = cea mai mică variație de preț (0.00001 la EURUSD); spread-ul se afișează în puncte.
-        "point": info.point,
-        "description": info.description,
-        "last": [tick.time_msc, tick.bid, tick.ask] if tick else None,
-        "recent": recent_ticks(symbol),
+        "point": info["point"],
+        "description": info["description"],
+        "last": last,
+        "recent": merge_ticks(bid, ask, RECENT_TICKS),
         "bars": bars,
     }
+
+
+# Lumânări mai vechi decât `before` (secunde UTC), cerute de pagină când chartul e derulat spre
+# stânga. O listă goală înseamnă că sursa nu mai are istoric.
+@app.get("/api/bars")
+async def older_bars(symbol: str, tf: int, before: int):
+    name = feed.resolve(symbol)
+    if name is None or tf not in TIMEFRAMES:
+        raise HTTPException(400, "Simbol sau timeframe necunoscut")
+    end = before * 1000
+    try:
+        if tf in PERIODS:
+            bars = await feed.trendbars(name, tf, OLDER_BARS, end)
+        else:
+            # Sub un minut: aflăm din ultima lumânare M1 unde se termină istoricul (în weekend
+            # sau de sărbători nu există ticuri), apoi construim lumânările din ticurile de dinainte.
+            m1 = await feed.trendbars(name, 60, 1, end)
+            if not m1:
+                return {"bars": []}
+            end = min(end, (m1[-1]["time"] + 60) * 1000)
+            bid = await feed.ticks(name, "BID", end - tf * HISTORY_BARS * 1000, end, max_pages=MAX_TICK_PAGES)
+            bars = [b for b in candles_from_ticks(bid, tf) if b["time"] < before]
+    except (CTraderError, ConnectionError, asyncio.TimeoutError) as e:
+        raise HTTPException(503, f"{SOURCE_NAME} indisponibil: {e}") from e
+    return {"bars": bars}
+
+
+# ---------- Export CSV ----------
+# Un export poate dura (un an de M1 sau de ticuri), deci rulează în fundal: pagina pornește
+# exportul, apoi întreabă periodic cât s-a făcut. Aici sunt exporturile din această sesiune.
+EXPORTS: dict[str, dict] = {}
+
+
+class ExportIn(BaseModel):
+    symbol: str
+    tf: int          # secunde; 0 = ticuri brute (bid / ask)
+    start: str       # datele alese (AAAA-LL-ZZ), folosite în numele fișierului
+    end: str
+    start_ms: int    # începutul zilei de start și sfârșitul zilei de final, în ora utilizatorului
+    end_ms: int
+
+
+# Ora UTC din CSV: „2025-10-15 21:00:00” (cu milisecunde pentru ticuri).
+def utc_text(ms: int, millis: bool = False) -> str:
+    text = datetime.fromtimestamp(ms // 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{text}.{ms % 1000:03d}" if millis else text
+
+
+# Pornește un export în fundal și întoarce starea lui (cu id-ul după care pagina îl urmărește).
+@app.post("/api/export")
+async def start_export(e: ExportIn):
+    if e.tf not in TF_LABELS:
+        raise HTTPException(400, "Timeframe necunoscut")
+    # Datele ajung în numele fișierului, deci acceptăm doar forma AAAA-LL-ZZ.
+    if not all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) for d in (e.start, e.end)):
+        raise HTTPException(400, "Dată invalidă")
+    # Începutul e aliniat la minut (lumânările sub un minut se construiesc pe bucăți aliniate);
+    # sfârșitul nu trece de momentul de acum.
+    start = e.start_ms // 60_000 * 60_000
+    end = min(e.end_ms, int(time.time() * 1000) + 1)
+    if end <= start:
+        raise HTTPException(400, "Data de start trebuie să fie înaintea datei de final")
+    name = feed.resolve(e.symbol.strip())
+    if name is None:
+        raise HTTPException(400, f"Simbol necunoscut: {e.symbol.strip().upper()}")
+    try:
+        info = await feed.info(name)
+    except (CTraderError, ConnectionError, asyncio.TimeoutError) as err:
+        raise HTTPException(503, f"{SOURCE_NAME} indisponibil: {err}") from err
+    # Ex.: exporturi_csv/EURUSD/EURUSD_M1_2025-10-15_2026-10-15.csv
+    safe = re.sub(r"[^\w.-]", "_", name)
+    path = EXPORT_DIR / safe / f"{safe}_{TF_LABELS[e.tf]}_{e.start}_{e.end}.csv"
+    job = {"id": uuid.uuid4().hex[:12], "status": "running", "progress": 0.0, "rows": 0,
+           "file": path.relative_to(ROOT).as_posix(), "name": path.name, "error": ""}
+    EXPORTS[job["id"]] = job
+    asyncio.create_task(run_export(job, path, name, e.tf, start, end, info["digits"]))
+    return job
+
+
+# Starea unui export: progres (0..1), rânduri scrise, eventuala eroare.
+@app.get("/api/export/{job_id}")
+async def export_status(job_id: str):
+    job = EXPORTS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Exportul nu există")
+    return job
+
+
+# Descarcă fișierul unui export terminat (util mai ales de pe telefon).
+@app.get("/api/export/{job_id}/file")
+async def export_file(job_id: str):
+    job = EXPORTS.get(job_id)
+    if job is None or job["status"] != "done":
+        raise HTTPException(404, "Exportul nu există sau nu e gata")
+    return FileResponse(ROOT / job["file"], media_type="text/csv", filename=job["name"])
+
+
+# Scrie CSV-ul bucată cu bucată, ca un an de date să nu stea tot în memorie. Fișierul se scrie
+# întâi cu extensia .tmp și primește numele final doar la sfârșit (nu rămân fișiere incomplete).
+async def run_export(job: dict, path: Path, name: str, tf: int, start: int, end: int, digits: int):
+    def price(p: float) -> str:
+        return f"{p:.{digits}f}"
+
+    def bar_rows(bars: list[dict]) -> list[list]:
+        return [[utc_text(b["time"] * 1000), price(b["open"]), price(b["high"]), price(b["low"]),
+                 price(b["close"]), b.get("volume", "")] for b in bars]
+
+    tmp = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if tf == 0:
+                w.writerow(["time_utc", "bid", "ask"])
+            else:
+                w.writerow(["time_utc", "open", "high", "low", "close", "volume"])
+            # Lumânările gata calculate se cer în bucăți mari; ticurile (și lumânările sub un minut,
+            # construite din ticuri) câte o oră, ca prețurile live să nu fie blocate mult timp.
+            step = max(tf * 1000 * 20_000, 86400_000) if tf in PERIODS else 3600_000
+            last = [None, None]   # ultimele bid / ask, păstrate de la o bucată la alta (ticuri)
+            t = start
+            while t < end:
+                to = min(t + step, end)
+                if tf in PERIODS:
+                    rows = bar_rows(await feed.bars_range(name, tf, t, to))
+                else:
+                    bid = await feed.ticks(name, "BID", t, to - 1, max_pages=100_000)
+                    bid = [x for x in bid if t <= x[0] < to]
+                    if tf == 0:
+                        ask = await feed.ticks(name, "ASK", t, to - 1, max_pages=100_000)
+                        ask = [x for x in ask if t <= x[0] < to]
+                        rows = await asyncio.to_thread(tick_rows, bid, ask, last, price)
+                    else:
+                        rows = bar_rows(await asyncio.to_thread(candles_from_ticks, bid, tf, None))
+                await asyncio.to_thread(w.writerows, rows)
+                job["rows"] += len(rows)
+                t = to
+                job["progress"] = (t - start) / (end - start)
+        tmp.replace(path)
+        job["status"] = "done"
+        print(f"[EXPORT] {job['file']}: {job['rows']} rânduri")
+    except Exception as err:  # noqa: BLE001 - orice eroare ajunge ca mesaj în pagină
+        job["status"] = "error"
+        job["error"] = str(err) or type(err).__name__
+        print(f"[EXPORT] {job['file']}: eroare: {job['error']}")
+        tmp.unlink(missing_ok=True)
+
+
+# Combină ticurile bid și ask ale unei bucăți în rânduri CSV [timp, bid, ask], ca merge_ticks,
+# dar pornind de la ultimele prețuri ale bucății anterioare (păstrate în `last`).
+def tick_rows(bid: list[tuple[int, float]], ask: list[tuple[int, float]], last: list, price) -> list[list]:
+    events = sorted([(t, 0, p) for t, p in bid] + [(t, 1, p) for t, p in ask])
+    out: list[list] = []
+    prev = None
+    for t, side, p in events:
+        last[side] = p
+        if last[0] is None or last[1] is None:
+            continue
+        row = [utc_text(t, millis=True), price(last[0]), price(last[1])]
+        # Bid și ask schimbate în aceeași milisecundă = un singur tic.
+        if prev == t:
+            out[-1] = row
+        else:
+            out.append(row)
+        prev = t
+    return out
 
 
 # Conexiunea WebSocket a unei pagini. Adresa e de forma /ws?symbol=EURUSD&tf=1
@@ -604,16 +732,33 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
     await ws.accept()
     if tf not in TIMEFRAMES:
         tf = 1
-    # build_hello face multe apeluri MT5 (posibil lente), deci rulează într-un fir separat.
-    hello = await asyncio.to_thread(build_hello, symbol, tf)
-    if hello is None:
-        await ws.send_text(json.dumps({"type": "error", "msg": f"Simbol necunoscut: {symbol}"}))
+
+    # Trimite o eroare paginii și închide. retry=True: pagina reîncearcă singură mai târziu
+    # (ex. sursa de prețuri temporar indisponibilă); fără retry: eroare definitivă (simbol inexistent).
+    async def fail(msg: str, retry: bool):
+        await ws.send_text(json.dumps({"type": "error", "msg": msg, "retry": retry}))
         await ws.close()
+
+    try:
+        await asyncio.wait_for(feed.ready.wait(), 10)
+    except asyncio.TimeoutError:
+        await fail(f"{SOURCE_NAME} indisponibil", retry=True)
+        return
+    name = feed.resolve(symbol)
+    if name is None:
+        await fail(f"Simbol necunoscut: {symbol}", retry=False)
         return
 
-    # Ne abonăm la ticurile simbolului; primim o coadă proprie.
-    q = hub.subscribe(symbol)
+    # Ne abonăm la ticurile simbolului ÎNAINTE de a cere istoricul, ca să nu pierdem ticurile
+    # sosite între timp; primim o coadă proprie.
+    q = hub.subscribe(name)
     try:
+        try:
+            hello = await build_hello(name, tf)
+        except (CTraderError, ConnectionError, asyncio.TimeoutError) as e:
+            print(f"[WEB] istoric {name}: {e}")
+            await fail(f"{SOURCE_NAME} indisponibil", retry=True)
+            return
         await ws.send_text(json.dumps(hello))
         # Pagina nu ne trimite date, dar trebuie să „ascultăm” ca să aflăm când se închide.
         receiver = asyncio.create_task(ws.receive_text())  # detectează închiderea de către client
@@ -634,7 +779,7 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
         pass
     finally:
         # Indiferent cum s-a terminat, eliberăm coada.
-        hub.unsubscribe(symbol, q)
+        hub.unsubscribe(name, q)
 
 
 # Punctul de pornire când rulezi `python server.py`.

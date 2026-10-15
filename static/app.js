@@ -16,7 +16,8 @@
 // Timeframe-urile disponibile: [durata unei lumânări în secunde, eticheta butonului].
 const TFS = [
   [1, "1s"], [5, "5s"], [15, "15s"], [30, "30s"],
-  [60, "M1"], [300, "M5"], [900, "M15"], [3600, "H1"], [14400, "H4"], [86400, "D1"],
+  [60, "M1"], [300, "M5"], [900, "M15"], [1800, "M30"], [3600, "H1"], [14400, "H4"], [86400, "D1"],
+  [604800, "W1"],
 ];
 // Câte ticuri păstrăm pentru chartul de ticuri (cele mai vechi se elimină).
 const MAX_TICKS = 600;
@@ -54,6 +55,30 @@ let state = {
   arrivals: [],       // momente locale de recepție, pentru ticuri/s
 };
 
+// Completează cu zerouri în față: pad(7) => "07", pad(5, 3) => "005".
+const pad = (n, w = 2) => String(n).padStart(w, "0");
+
+// Timpii vin de la server în UTC; îi afișăm în ora locală a dispozitivului.
+// Pentru chartul de lumânări, `t` e în secunde (cum îl folosește lightweight-charts).
+const MONTHS = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oct", "nov", "dec"];
+function fmtBarTime(t) {
+  const d = new Date(t * 1000);
+  return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+// Etichetele de pe axa de timp. `type` spune ce fel de reper e (vezi TickMarkType în
+// documentația lightweight-charts): 0 = an, 1 = lună, 2 = zi, 3 = oră, 4 = oră cu secunde.
+function fmtTickMark(t, type) {
+  const d = new Date(t * 1000);
+  switch (type) {
+    case 0: return String(d.getFullYear());
+    case 1: return MONTHS[d.getMonth()];
+    case 2: return String(d.getDate());
+    case 3: return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    default: return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+}
+
 // ---------- Chart de lumânări ----------
 // Creăm chartul în elementul <section id="candles">. autoSize: își ajustează singur mărimea
 // când se schimbă dimensiunea ferestrei. Culorile se iau din style.css.
@@ -64,7 +89,12 @@ const chart = LightweightCharts.createChart($("candles"), {
   rightPriceScale: { borderColor: css("--border") },
   // timeVisible/secondsVisible: axa de timp arată ore, minute și secunde.
   // rightOffset: 8 lumânări de spațiu liber în dreapta ultimei lumânări.
-  timeScale: { borderColor: css("--border"), timeVisible: true, secondsVisible: true, rightOffset: 8 },
+  timeScale: {
+    borderColor: css("--border"), timeVisible: true, secondsVisible: true, rightOffset: 8,
+    tickMarkFormatter: fmtTickMark,
+  },
+  // Ora din dreptul cursorului (crosshair), tot în ora locală.
+  localization: { timeFormatter: fmtBarTime },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
 });
 // Seria de lumânări: verde pentru lumânările care urcă, roșu pentru cele care coboară.
@@ -72,7 +102,7 @@ const series = chart.addCandlestickSeries({
   upColor: css("--up"), downColor: css("--down"),
   wickUpColor: css("--up"), wickDownColor: css("--down"), borderVisible: false,
 });
-// Linia punctată galbenă cu prețul ask (lumânările sunt desenate pe bid, ca în MetaTrader).
+// Linia punctată galbenă cu prețul ask (lumânările sunt desenate pe bid, ca în cTrader și MetaTrader).
 const askLine = series.createPriceLine({
   price: 0, color: css("--ask"), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
   axisLabelVisible: true, title: "ask",
@@ -88,10 +118,12 @@ function applyDigits() {
 // Actualizează lumânarea curentă cu un tic nou (doar bid-ul contează pentru lumânări).
 function onTick(msc, bid, ask) {
   // Începutul intervalului din care face parte ticul. Ex. tf=60 (M1): ticul de la 10:00:37
-  // aparține lumânării care începe la 10:00:00.
+  // aparține lumânării care începe la 10:00:00. Numărăm intervalele de la ultima lumânare
+  // primită de la server, ca să respectăm alinierea ei (ex. D1 care începe la ora brokerului).
   const sec = Math.floor(msc / 1000);
-  const t = Math.floor(sec / state.tf) * state.tf;
   const b = state.lastBar;
+  const base = b ? b.time : 0;
+  const t = base + Math.floor((sec - base) / state.tf) * state.tf;
   if (!b || t > b.time) {
     // Ticul deschide o lumânare nouă: toate cele 4 prețuri pornesc de la el.
     state.lastBar = { time: t, open: bid, high: bid, low: bid, close: bid };
@@ -108,13 +140,11 @@ function onTick(msc, bid, ask) {
 }
 
 // ---------- Panou de cotații ----------
-// Completează cu zerouri în față: pad(7) => "07", pad(5, 3) => "005".
-const pad = (n, w = 2) => String(n).padStart(w, "0");
 // Transformă un moment în milisecunde în text „HH:MM:SS.mmm”.
 function fmtTime(msc) {
-  // Timpul serverului MT5 e trimis „ca UTC”, deci îl afișăm cu getUTC*.
+  // Timpul vine în UTC; get* (fără UTC) îl afișează în ora locală.
   const d = new Date(msc);
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`;
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
 }
 
 // Actualizează zona de sus: bid, ask, spread, ora ultimului tic și linia ask de pe chart.
@@ -264,6 +294,9 @@ function connect() {
       state.prevBid = null;
       applyDigits();
       // Înlocuim toate lumânările din chart cu istoricul primit.
+      // Istoric nou: istoricul mai vechi se încarcă din nou, de la zero, la derulare.
+      // (Înainte de setData, care poate cere imediat lumânări mai vechi.)
+      older = { loading: false, done: false, retryAt: 0 };
       series.setData(msg.bars);
       state.lastBar = msg.bars.length ? { ...msg.bars[msg.bars.length - 1] } : null;
       chart.timeScale().scrollToRealTime();
@@ -292,19 +325,63 @@ function connect() {
       const [msc, bid, ask] = msg.d[msg.d.length - 1];
       updateQuote(msc, bid, ask);
       requestDraw();
+    } else if (msg.type === "feed") {
+      // Starea conexiunii server ↔ sursa de prețuri. La revenire ne reconectăm, ca să primim
+      // și istoricul din perioada în care conexiunea a lipsit.
+      if (msg.up) connect();
+      else setStatus(false, "sursa de prețuri deconectată — reîncerc");
     } else if (msg.type === "error") {
-      // Ex. simbol inexistent: afișăm mesajul și NU mai încercăm reconectarea.
+      // Afișăm mesajul. Pentru erori definitive (ex. simbol inexistent) NU mai încercăm
+      // reconectarea; pentru cele temporare (msg.retry, ex. sursa de prețuri indisponibilă), da.
       setStatus(false, msg.msg);
-      sock.onclose = null;
+      sock.errorMsg = msg.msg;
+      if (!msg.retry) sock.onclose = null;
     }
   };
   // Conexiunea a căzut (server oprit, internet întrerupt): reîncercăm cu pauze tot mai mari –
   // 1s, 2s, 4s, 8s, apoi maximum 10s – ca să nu bombardăm serverul.
   sock.onclose = () => {
-    setStatus(false, "deconectat — reîncerc");
+    setStatus(false, `${sock.errorMsg || "deconectat"} — reîncerc`);
     retryTimer = setTimeout(connect, Math.min(1000 * 2 ** retry++, 10000));
   };
 }
+
+// ---------- Istoric mai vechi ----------
+// La conectare primim cel puțin un an de lumânări (de la M1 în sus, cel mult 10.000). Când
+// chartul e derulat aproape de prima lumânare, cerem de la server lumânările de dinainte.
+// `older` se înlocuiește la fiecare istoric nou, deci un răspuns pentru un simbol / timeframe
+// vechi e ignorat. done = sursa nu mai are istoric; retryAt = pauză după o eroare.
+let older = { loading: false, done: false, retryAt: 0 };
+
+async function loadOlder() {
+  const o = older;
+  const data = series.data();
+  if (o.loading || o.done || !data.length || Date.now() < o.retryAt) return;
+  o.loading = true;
+  try {
+    const q = `symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}&before=${data[0].time}`;
+    const r = await fetch(`/api/bars?${q}`);
+    if (!r.ok) throw new Error(r.statusText);
+    const { bars } = await r.json();
+    if (o !== older) return;
+    const cur = series.data();
+    const add = bars.filter((b) => b.time < cur[0].time);
+    if (!add.length) { o.done = true; return; }
+    // Adăugăm lumânările în față și păstrăm pe ecran exact aceeași porțiune de chart.
+    const range = chart.timeScale().getVisibleLogicalRange();
+    series.setData([...add, ...cur]);
+    if (range) {
+      chart.timeScale().setVisibleLogicalRange({ from: range.from + add.length, to: range.to + add.length });
+    }
+  } catch {
+    o.retryAt = Date.now() + 5000;
+  } finally {
+    o.loading = false;
+  }
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (range && range.from < 200) loadOlder();
+});
 
 // ---------- Controale ----------
 // Creăm câte un buton pentru fiecare timeframe din TFS. La click: îl reținem, îl marcăm

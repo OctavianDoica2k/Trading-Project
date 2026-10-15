@@ -111,6 +111,24 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* Fără alarme active, bulina devine gri. */
 .badge.zero { background: var(--border); color: var(--muted); }
 
+/* ---------- Export CSV ---------- */
+/* Butonul 💾 stă fix în colțul din dreapta sus al barei (bara îi păstrează loc în dreapta). */
+header { position: relative; padding-right: 150px; }
+.exportbtn { position: absolute; top: 10px; right: 16px; }
+.exportbtn:hover { border-color: var(--accent); }
+/* Fereastra de export nu se mută cu mouse-ul. */
+#exportPanel .panelhead { cursor: default; }
+#exportForm { padding-top: 8px; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.presets .ghost { padding: 6px 9px; }
+/* Bara de progres: chenarul gri, umplerea albastră (lățimea e setată de export.js). */
+.progress { height: 6px; border-radius: 3px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+.progress[hidden] { display: none; }
+.progress div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.msg a { color: var(--accent); font-weight: 600; }
+.primary:disabled { opacity: .55; cursor: default; }
+code { word-break: break-all; }
+
 .panel {
   /* Fereastră plutitoare centrată pe zona chartului (fără scala de prețuri din dreapta). */
   /* position: fixed = rămâne pe loc pe ecran; z-index: 20 = deasupra charturilor. */
@@ -148,15 +166,15 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .iconbtn:hover { color: var(--text); background: var(--bg); }
 
 /* Formularul: câmpurile unul sub altul, fiecare cu eticheta deasupra. */
-#alertForm { display: flex; flex-direction: column; gap: 12px; }
-#alertForm label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; flex: 1; }
-#alertForm .row { display: flex; gap: 10px; }
-#alertForm input, #alertForm select {
+.form { display: flex; flex-direction: column; gap: 12px; }
+.form label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; flex: 1; }
+.form .row { display: flex; gap: 10px; }
+.form input, .form select {
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 8px; font: 14px/1.2 inherit; width: 100%; min-width: 0;
 }
-#alertForm input:focus, #alertForm select:focus { outline: none; border-color: var(--accent); }
+.form input:focus, .form select:focus { outline: none; border-color: var(--accent); }
 #aSymbol { font-weight: 600; }
 /* Rândul cu −, câmpul de preț, + și „Preț curent”. */
 .pricebox { display: flex; gap: 4px; }
@@ -256,6 +274,12 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   /* Pe telefon butonul de alarme arată doar 🔔 și numărul (textul „Alarme” se ascunde). */
   .alertbtn { flex: none; padding: 6px 8px; gap: 4px; }
   .alertbtn .btntxt { display: none; }
+  /* Butonul de export rămâne pe rândul controalelor, în dreapta; cotația trece dedesubt. */
+  .controls { width: auto; flex: 1; min-width: 0; }
+  header { padding-right: 12px; }
+  .exportbtn { position: static; flex: none; padding: 6px 8px; }
+  .exportbtn .btntxt { display: none; }
+  .quote { order: 1; }
   /* Cotația pe o grilă de 3 coloane. */
   .quote {
     width: 100%; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 10px;
@@ -273,9 +297,9 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   }
   .panelhead { cursor: default; padding: 10px 0 8px; }
   .draghint { display: none; }
-  #alertForm { gap: 9px; }
-  #alertForm .row { gap: 8px; }
-  #alertForm input, #alertForm select { font-size: 16px; } /* fără zoom automat pe iOS */
+  .form { gap: 9px; }
+  .form .row { gap: 8px; }
+  .form input, .form select { font-size: 16px; } /* fără zoom automat pe iOS */
   .step { width: 42px; }
   .primary { flex: 1; }
 }

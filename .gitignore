@@ -5,3 +5,6 @@ __pycache__/
 vapid_private.pem
 push_subscriptions.json
 push_subscriptions.tmp
+ctrader_token.json
+ctrader_token.tmp
+exporturi_csv/

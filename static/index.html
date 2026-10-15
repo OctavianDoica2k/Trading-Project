@@ -31,10 +31,12 @@
     <div class="px"><span class="lbl">BID</span><span id="bid">—</span></div>
     <div class="px"><span class="lbl">ASK</span><span id="ask">—</span></div>
     <div class="stat"><span class="lbl">Spread</span><span id="spread">—</span></div>
-    <div class="stat"><span class="lbl">Ultimul tic (server)</span><span id="ticktime">—</span></div>
+    <div class="stat"><span class="lbl">Ultimul tic</span><span id="ticktime">—</span></div>
     <div class="stat"><span class="lbl">Ticuri/s</span><span id="tps">0</span></div>
     <div class="stat"><span class="lbl">Stare</span><span id="status" class="off">deconectat</span></div>
   </div>
+  <!-- Butonul din dreapta sus care deschide fereastra de export CSV (gestionată de export.js). -->
+  <button id="exportBtn" class="alertbtn exportbtn" title="Salvează datele în CSV">💾<span class="btntxt">Export CSV</span></button>
 </header>
 <!-- ===== Zona principală: cele două charturi ===== -->
 <main>
@@ -55,7 +57,7 @@
     <button id="alertClose" class="iconbtn" aria-label="Închide">✕</button>
   </div>
   <!-- Formularul de creare a unei alarme (trimis de alerts.js prin form.onsubmit). -->
-  <form id="alertForm" autocomplete="off">
+  <form id="alertForm" class="form" autocomplete="off">
     <div class="row">
       <!-- Simbolul e completat automat cu simbolul chartului (readonly = nu se poate edita). -->
       <label>Simbol<input id="aSymbol" readonly></label>
@@ -108,11 +110,48 @@
   <div class="listhead">Alarmele tale</div>
   <ul id="alertList" class="alertlist"></ul>
 </aside>
+<!-- ===== Fereastra de export CSV (ascunsă până apeși 💾) ===== -->
+<aside id="exportPanel" class="panel" role="dialog" aria-label="Export CSV" hidden>
+  <div class="panelhead">
+    <h2>Export date în CSV</h2>
+    <button id="exportClose" class="iconbtn" aria-label="Închide">✕</button>
+  </div>
+  <form id="exportForm" class="form" autocomplete="off">
+    <div class="row">
+      <!-- Pornește cu simbolul chartului, dar se poate alege oricare (aceleași sugestii). -->
+      <label>Simbol<input id="eSymbol" list="symbols" spellcheck="false" required></label>
+      <!-- Opțiunile (ticuri + timeframe-urile) sunt adăugate de export.js. -->
+      <label>Timeframe<select id="eTf"></select></label>
+    </div>
+    <div class="row">
+      <label>Data de start<input id="eStart" type="date" required></label>
+      <label>Data de final<input id="eEnd" type="date" required></label>
+    </div>
+    <!-- Scurtături pentru perioadă: setează data de start față de data de final. -->
+    <div class="presets">
+      <button type="button" class="ghost" data-days="7">1 săpt.</button>
+      <button type="button" class="ghost" data-months="1">1 lună</button>
+      <button type="button" class="ghost" data-months="3">3 luni</button>
+      <button type="button" class="ghost" data-months="12">1 an</button>
+    </div>
+    <small id="eHint" class="hint"></small>
+    <div class="actions">
+      <button type="submit" id="eGo" class="primary">Salvează CSV</button>
+    </div>
+    <!-- Bara de progres a exportului în curs. -->
+    <div id="eProgress" class="progress" hidden><div></div></div>
+    <div id="eMsg" class="msg"></div>
+    <small class="tip">Fișierul se salvează pe PC-ul cu serverul, în folderul
+      <code>exporturi_csv/&lt;simbol&gt;/</code>, cu numele
+      <code>SIMBOL_TIMEFRAME_START_FINAL.csv</code>. Orele din CSV sunt în UTC.</small>
+  </form>
+</aside>
 <!-- Containerul pentru mesajele plutitoare („toast”) afișate la declanșarea unei alarme. -->
 <div id="toasts" class="toasts"></div>
 <!-- Scripturile, în ordinea obligatorie: alerts.js și push.js folosesc variabile definite în app.js. -->
 <script src="/static/app.js"></script>
 <script src="/static/alerts.js"></script>
 <script src="/static/push.js"></script>
+<script src="/static/export.js"></script>
 </body>
 </html>

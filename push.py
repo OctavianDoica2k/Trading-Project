@@ -167,7 +167,7 @@ class PushService:
             "url": f"/?symbol={alert['symbol']}",
         }
         # Trimiterea (care așteaptă răspunsuri de la servere externe) se face într-un fir separat,
-        # ca firul MT5, care ne-a apelat, să nu fie întârziat.
+        # ca serverul, care ne-a apelat, să nu fie întârziat.
         threading.Thread(target=self._send_many, args=(self.targets(alert.get("email", "")), payload),
                          daemon=True).start()
 
