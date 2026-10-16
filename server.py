@@ -101,6 +101,9 @@ TF_LABELS = {0: "ticuri", 1: "1s", 5: "5s", 15: "15s", 30: "30s", 60: "M1", 300:
              1800: "M30", 3600: "H1", 14400: "H4", 86400: "D1", 604800: "W1"}
 # Folderul în care se salvează exporturile CSV (câte un subfolder pentru fiecare simbol).
 EXPORT_DIR = ROOT / "exporturi_csv"
+# Baza de date locală cu lumânări, completată automat la fiecare simbol / timeframe deschis:
+# datastore/<sursă>/<SIMBOL>/<TIMEFRAME>/<SIMBOL>_<TIMEFRAME>.csv (vezi „Datastore local”).
+DATASTORE_DIR = ROOT / "datastore"
 
 # Folderul cu fișierele paginii web (HTML, CSS, JavaScript).
 STATIC = ROOT / "static"
@@ -584,6 +587,66 @@ async def older_bars(symbol: str, tf: int, before: int):
     return {"bars": bars}
 
 
+# ---------- Linii de trend (analysis.py) ----------
+# Butonul „📈 Trend” trimite lumânările vizibile pe chart. Rulăm pe ele partea a 2-a din
+# analysis.py (după linia #----#), exact cum e scrisă: ea citește `df` și umple listele maxim,
+# minim, dr_max_valid și dr_min_valid. Fișierul e citit la fiecare cerere, deci o modificare în
+# analysis.py se vede la următoarea apăsare, fără repornirea serverului.
+ANALYSIS = Path(__file__).with_name("analysis.py")
+# Algoritmul verifică fiecare pereche de pivoturi pe toate lumânările de după ea, deci durata
+# crește foarte repede: ~6 s la 300 de lumânări, ~30 s la 500. Peste limită luăm ultimele 300.
+TREND_MAX_BARS = 300
+
+
+class TrendBarsIn(BaseModel):
+    bars: list[dict]   # lumânările de pe chart: {time, open, high, low, close}
+
+
+def run_trend_analysis(bars: list[dict]) -> dict:
+    import pandas as pd  # doar aici, ca restul serverului să nu depindă de pandas
+
+    src = ANALYSIS.read_text(encoding="utf-8")
+    parts = re.split(r"^#-{5,}#\s*$", src, maxsplit=1, flags=re.M)
+    if len(parts) < 2:
+        raise ValueError("Nu găsesc linia #----# care separă partea a 2-a din analysis.py")
+    df = pd.DataFrame(bars, columns=["time", "open", "high", "low", "close"])
+    ns = {"df": df, "pd": pd}
+    exec(compile(parts[1], str(ANALYSIS), "exec"), ns)
+
+    # Fiecare dreaptă validă e o pereche (i, j) de poziții din maxim / minim; un punct e
+    # (indexul lumânării în df, prețul). O desenăm de la primul punct până la ultima lumânare.
+    last = len(df) - 1
+
+    def lines(points, pairs):
+        out = []
+        for i, j in pairs:
+            (x1, y1), (x2, y2) = points[i], points[j]
+            y_end = y1 + (y2 - y1) / (x2 - x1) * (last - x1)
+            out.append({"from": {"time": bars[x1]["time"], "value": float(y1)},
+                        "via": {"time": bars[x2]["time"], "value": float(y2)},
+                        "to": {"time": bars[last]["time"], "value": float(y_end)}})
+        return out
+
+    return {"max": lines(ns["maxim"], ns["dr_max_valid"]),
+            "min": lines(ns["minim"], ns["dr_min_valid"]),
+            "pivots": {"max": len(ns["maxim"]), "min": len(ns["minim"])},
+            "bars": len(df)}
+
+
+@app.post("/api/trendlines")
+async def trendlines(t: TrendBarsIn):
+    bars = t.bars[-TREND_MAX_BARS:]
+    if len(bars) < 7:
+        raise HTTPException(400, "Sunt prea puține lumânări pe ecran (minimum 7)")
+    try:
+        # Calculul e lent și blocant: îl rulăm pe un fir separat, ca prețurile live să nu se oprească.
+        result = await asyncio.to_thread(run_trend_analysis, bars)
+    except Exception as e:
+        raise HTTPException(500, f"Eroare în analysis.py: {type(e).__name__}: {e}") from e
+    result["truncated"] = len(t.bars) > TREND_MAX_BARS
+    return result
+
+
 # ---------- Export CSV ----------
 # Un export poate dura (un an de M1 sau de ticuri), deci rulează în fundal: pagina pornește
 # exportul, apoi întreabă periodic cât s-a făcut. Aici sunt exporturile din această sesiune.
@@ -603,6 +666,14 @@ class ExportIn(BaseModel):
 def utc_text(ms: int, millis: bool = False) -> str:
     text = datetime.fromtimestamp(ms // 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     return f"{text}.{ms % 1000:03d}" if millis else text
+
+
+# Rândurile CSV ale unor lumânări: time_utc, open, high, low, close, volume.
+def bars_to_rows(bars: list[dict], digits: int) -> list[list]:
+    def price(p: float) -> str:
+        return f"{p:.{digits}f}"
+    return [[utc_text(b["time"] * 1000), price(b["open"]), price(b["high"]), price(b["low"]),
+             price(b["close"]), b.get("volume", "")] for b in bars]
 
 
 # Pornește un export în fundal și întoarce starea lui (cu id-ul după care pagina îl urmărește).
@@ -661,8 +732,7 @@ async def run_export(job: dict, path: Path, name: str, tf: int, start: int, end:
         return f"{p:.{digits}f}"
 
     def bar_rows(bars: list[dict]) -> list[list]:
-        return [[utc_text(b["time"] * 1000), price(b["open"]), price(b["high"]), price(b["low"]),
-                 price(b["close"]), b.get("volume", "")] for b in bars]
+        return bars_to_rows(bars, digits)
 
     tmp = path.with_suffix(".tmp")
     try:
@@ -725,6 +795,113 @@ def tick_rows(bid: list[tuple[int, float]], ask: list[tuple[int, float]], last: 
     return out
 
 
+# ---------- Datastore local ----------
+# De fiecare dată când o pagină deschide un simbol / timeframe (M1 și peste), lumânările primite
+# pentru chart se salvează și pe disc. Structura folderelor spune ce conține fiecare fișier:
+#
+#   datastore/
+#     ctrader/                     <- sursa prețurilor (cTrader și MT5 au prețuri / ore diferite)
+#       EURUSD/                    <- simbolul
+#         D1/                      <- timeframe-ul
+#           EURUSD_D1.csv          <- lumânările: time_utc,open,high,low,close,volume (UTC)
+#           info.json              <- descrierea fișierului: perioada, numărul de lumânări etc.
+#
+# Prima deschidere creează fișierul cu istoricul trimis chartului (cel puțin un an, cel mult
+# 10.000 de lumânări). La următoarele se adaugă doar lumânările noi, până la zi; dacă între
+# ultima lumânare salvată și istoricul chartului e o pauză, o cerem separat de la sursă.
+# Se salvează doar lumânările închise: cea în curs se schimbă la fiecare tic.
+# Sub un minut (1s–30s) nu salvăm: lumânările se construiesc din ticuri și acoperă doar câteva minute.
+STORE_LOCKS: dict[tuple[str, int], asyncio.Lock] = {}
+STORE_TASKS: set[asyncio.Task] = set()   # referințe la salvările în curs (altfel pot fi oprite)
+CSV_HEADER = ["time_utc", "open", "high", "low", "close", "volume"]
+
+
+def store_path(name: str, tf: int) -> Path:
+    safe = re.sub(r"[^\w.-]", "_", name)
+    label = TF_LABELS[tf]
+    return DATASTORE_DIR / PRICE_SOURCE / safe / label / f"{safe}_{label}.csv"
+
+
+# Momentul (secunde UTC) ultimei lumânări din fișier, citind doar sfârșitul lui.
+def last_stored_time(path: Path) -> int | None:
+    with path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 4096))
+        lines = f.read().decode("utf-8").strip().splitlines()
+    if not lines or lines[-1].startswith("time_utc"):
+        return None
+    text = lines[-1].split(",", 1)[0]
+    return int(datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+
+
+def write_store_info(path: Path, name: str, tf: int, digits: int, added: int):
+    info_path = path.with_name("info.json")
+    try:
+        old = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    with path.open(encoding="utf-8") as f:
+        rows = sum(1 for _ in f) - 1
+        f.seek(0)
+        next(f, None)
+        first = (next(f, "") or "").split(",", 1)[0]
+    info = {
+        "source": PRICE_SOURCE, "symbol": name, "timeframe": TF_LABELS[tf], "seconds": tf,
+        "digits": digits, "columns": CSV_HEADER, "timezone": "UTC",
+        "first_bar": first, "last_bar": utc_text(last_stored_time(path) * 1000) if rows else "",
+        "bars": rows, "created": old.get("created") or utc_text(int(time.time() * 1000)),
+        "updated": utc_text(int(time.time() * 1000)), "last_added": added,
+    }
+    tmp = info_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(info_path)
+
+
+async def save_to_store(name: str, tf: int, bars: list[dict], digits: int):
+    if tf not in PERIODS:
+        return
+    path = store_path(name, tf)
+    rel = path.parent.relative_to(ROOT).as_posix()
+    lock = STORE_LOCKS.setdefault((name, tf), asyncio.Lock())
+    async with lock:
+        try:
+            now = time.time()
+            closed = [b for b in bars if b["time"] + tf <= now]
+            if path.exists():
+                last = await asyncio.to_thread(last_stored_time, path)
+                if last is not None:
+                    # Pauză între fișier și istoricul chartului: cerem lumânările lipsă de la sursă.
+                    first = closed[0]["time"] if closed else int(now)
+                    if first > last + tf:
+                        gap = await feed.bars_range(name, tf, (last + tf) * 1000, first * 1000)
+                        closed = gap + closed
+                    closed = [b for b in closed if b["time"] > last and b["time"] + tf <= now]
+                rows = bars_to_rows(closed, digits)
+                if rows:
+                    def append():
+                        with path.open("a", newline="", encoding="utf-8") as f:
+                            csv.writer(f).writerows(rows)
+                    await asyncio.to_thread(append)
+            else:
+                rows = bars_to_rows(closed, digits)
+                if not rows:
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+
+                def create():
+                    with tmp.open("w", newline="", encoding="utf-8") as f:
+                        w = csv.writer(f)
+                        w.writerow(CSV_HEADER)
+                        w.writerows(rows)
+                    tmp.replace(path)
+                await asyncio.to_thread(create)
+            await asyncio.to_thread(write_store_info, path, name, tf, digits, len(rows))
+            print(f"[DATASTORE] {rel}: +{len(rows)} lumânări")
+        except Exception as e:  # noqa: BLE001 - salvarea nu trebuie să afecteze chartul
+            print(f"[DATASTORE] {rel}: eroare: {type(e).__name__}: {e}")
+
+
 # Conexiunea WebSocket a unei pagini. Adresa e de forma /ws?symbol=EURUSD&tf=1
 # (FastAPI preia automat symbol și tf din adresă).
 @app.websocket("/ws")
@@ -760,6 +937,10 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
             await fail(f"{SOURCE_NAME} indisponibil", retry=True)
             return
         await ws.send_text(json.dumps(hello))
+        # Salvăm lumânările și în datastore, în fundal (chartul nu așteaptă după disc).
+        task = asyncio.create_task(save_to_store(name, tf, hello["bars"], hello["digits"]))
+        STORE_TASKS.add(task)
+        task.add_done_callback(STORE_TASKS.discard)
         # Pagina nu ne trimite date, dar trebuie să „ascultăm” ca să aflăm când se închide.
         receiver = asyncio.create_task(ws.receive_text())  # detectează închiderea de către client
         while True:

@@ -18,7 +18,7 @@ def timeframe_trends_indicator(df):
     trendlastmonth = round((lastmonth.iloc[len(lastmonth)-1]['close'] - lastmonth.iloc[0]['open']) / (mhigh - mlow) *100, 2)
 
     for i in range(len(lastmonth)-1, len(lastmonth)-6, -1):
-        if pd.to_datetime(lastmonth.iloc[i]['time_utc']) - pd.to_datetime(lastmonth.iloc[i-1]['time_utc']) > pd.Timedelta(days= 1) or (pd.to_datetime(lastmonth.iloc[i]['time_utc']).month ==1 and pd.to_datetime(lastmonth.iloc[i]['time_utc']).day ==1): break
+        if pd.to_datetime(lastmonth.iloc[i]['time_utc']) - pd.to_datetime(lastmonth.iloc[i-1]['time_utc']) > pd.Timedelta(days= 1) or pd.to_datetime(lastmonth.iloc[i]['time_utc']).day ==1: break
     
     lastweek = lastmonth[lastmonth.index >= i].reset_index(drop = True)
 
@@ -52,7 +52,7 @@ for i in range(len(maxim)):
         m = (maxim[j][0] - maxim[i][0]) / (maxim[j][1] - maxim[i][1])
         k = maxim[i][0]
         valid = 1
-        for l in range(j+1, len(df), 1):
+        for l in range(maxim[i][0] + 1, len(df), 1):
             if (l-k)/m + n < df.iloc[l]['close']: valid = 0
         if valid == 1: dr_max_valid.append((i,j))
         
@@ -64,6 +64,6 @@ for i in range(len(minim)):
         m = (minim[j][0] - minim[i][0]) / (minim[j][1] - minim[i][1])
         k = minim[i][0]
         valid = 1
-        for l in range(j+1, len(df), 1):
+        for l in range(minim[i][0] + 1, len(df), 1):
             if (l-k)/m + n > df.iloc[l]['close']: valid = 0
         if valid == 1: dr_min_valid.append((i,j))

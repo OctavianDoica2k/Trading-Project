@@ -25,6 +25,8 @@
     <div id="tfs" class="tfs"></div>
     <!-- Butonul care deschide fereastra de alarme; #alertCount = numărul de alarme active. -->
     <button id="alertBtn" class="alertbtn" title="Alarme de preț">🔔<span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
+    <!-- Desenează / șterge liniile de trend valide din analysis.py (gestionat de trend.js). -->
+    <button id="trendBtn" class="alertbtn trendbtn" title="Linii de trend valide (analysis.py) pe lumânările vizibile">📈<span class="btntxt">Trend</span><span id="trendCount" class="badge" hidden>0</span></button>
   </div>
   <!-- Cotația: fiecare valoare are un id pe care app.js îl actualizează la fiecare tic. -->
   <div class="quote">
@@ -153,5 +155,6 @@
 <script src="/static/alerts.js"></script>
 <script src="/static/push.js"></script>
 <script src="/static/export.js"></script>
+<script src="/static/trend.js"></script>
 </body>
 </html>

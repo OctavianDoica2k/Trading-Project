@@ -309,6 +309,8 @@ function connect() {
       requestDraw();
       // Anunțăm alerts.js că s-a încărcat un simbol (dacă a definit funcția; `?.` = doar dacă există).
       window.onSymbolLoaded?.();
+      // Liniile de trend desenate pentru istoricul vechi nu mai sunt valabile (vezi trend.js).
+      window.onHistoryLoaded?.();
     } else if (msg.type === "alert") {
       // O alarmă s-a declanșat sau s-a actualizat: o tratează alerts.js.
       window.onAlertEvent?.(msg.alert);

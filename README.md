@@ -75,6 +75,28 @@ Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te 
   ticuri ~220.000 de rânduri (un an de ticuri: zeci de milioane de rânduri, durează mult). Cu cTrader,
   ticurile vin în pagini limitate de server, deci exporturile de ticuri sunt mai lente.
 
+## Datastore local (automat)
+De fiecare dată când alegi un simbol sau un timeframe (de la M1 în sus), lumânările se salvează
+automat pe PC-ul cu serverul, în `datastore/`:
+
+```
+datastore/
+  mt5/                  <- sursa prețurilor (ctrader sau mt5; prețurile și orele diferă între ele)
+    EURUSD/             <- simbolul
+      D1/               <- timeframe-ul
+        EURUSD_D1.csv   <- lumânările: time_utc,open,high,low,close,volume (UTC, ca la export)
+        info.json       <- ce conține fișierul: prima și ultima lumânare, câte sunt, ultima actualizare
+      H1/
+        EURUSD_H1.csv
+        info.json
+```
+
+- Prima deschidere salvează istoricul încărcat de chart (cel puțin un an, cel mult 10.000 de lumânări).
+- La următoarele se adaugă doar lumânările noi, până la zi. Dacă a trecut mult de la ultima salvare,
+  lumânările lipsă se cer separat de la sursă, ca fișierul să nu aibă goluri.
+- Se salvează doar lumânările închise; cea în curs apare la următoarea deschidere.
+- Timeframe-urile sub un minut (1s–30s) nu se salvează (sunt construite din ticuri, doar ultimele minute).
+
 ## Fișiere
 - `server.py`: WebSocket-ul de prețuri către pagini, istoricul pentru chart, API-ul pentru alarme
 - `ctrader.py`: conexiunea cu cTrader Open API (prețuri live, istoric, reconectare, reînnoirea tokenului)
@@ -84,6 +106,7 @@ Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te 
 - `push.py`: notificările push (cheia VAPID în `vapid_private.pem`, dispozitivele în `push_subscriptions.json`)
 - `static/`: interfața (chart de lumânări, chart de ticuri, panoul de alarme, exportul CSV în `export.js`)
 - `exporturi_csv/`: fișierele CSV exportate (câte un subfolder pentru fiecare simbol)
+- `datastore/`: baza de date locală cu lumânări, pe sursă / simbol / timeframe (vezi mai sus)
 
 ## Notificări push (Windows / Android)
 - În fereastra de alarme: **Notificări pe acest dispozitiv → Activează notificări** și permite în browser.

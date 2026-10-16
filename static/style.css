@@ -111,6 +111,13 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* Fără alarme active, bulina devine gri. */
 .badge.zero { background: var(--border); color: var(--muted); }
 
+/* ---------- Linii de trend ---------- */
+/* Butonul 📈: bulina arată câte linii sunt desenate; „busy” = calculul e în curs. */
+.trendbtn:hover, .trendbtn.on { border-color: var(--accent); }
+.trendbtn .badge { background: var(--accent); }
+.trendbtn.busy { opacity: 0.6; cursor: progress; }
+.badge[hidden] { display: none; }
+
 /* ---------- Export CSV ---------- */
 /* Butonul 💾 stă fix în colțul din dreapta sus al barei (bara îi păstrează loc în dreapta). */
 header { position: relative; padding-right: 150px; }
