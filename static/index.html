@@ -25,8 +25,6 @@
     <div id="tfs" class="tfs"></div>
     <!-- Butonul care deschide fereastra de alarme; #alertCount = numărul de alarme active. -->
     <button id="alertBtn" class="alertbtn" title="Alarme de preț">🔔<span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
-    <!-- Desenează / șterge liniile de trend valide din analysis.py (gestionat de trend.js). -->
-    <button id="trendBtn" class="alertbtn trendbtn" title="Linii de trend valide (analysis.py) pe lumânările vizibile">📈<span class="btntxt">Trend</span><span id="trendCount" class="badge" hidden>0</span></button>
   </div>
   <!-- Cotația: fiecare valoare are un id pe care app.js îl actualizează la fiecare tic. -->
   <div class="quote">
@@ -43,7 +41,12 @@
 <!-- ===== Zona principală: cele două charturi ===== -->
 <main>
   <!-- Chartul de lumânări (desenat de lightweight-charts în acest element). -->
-  <section id="candles" class="pane"></section>
+  <section id="candles" class="pane">
+    <!-- Butonul din stânga sus al chartului care deschide meniul de indicatori (indicators.js). -->
+    <button id="indBtn" class="chartbtn" title="Indicatori"><i>ƒx</i> Indicatori</button>
+    <!-- Aici apar, în dreapta sus, controalele indicatorilor atașați (ex. sliderul Trend). -->
+    <div id="indWidgets" class="indwidgets"></div>
+  </section>
   <!-- Chartul de ticuri, desenat de app.js pe <canvas>. -->
   <section class="pane tickpane">
     <div class="panetitle">Ticuri (bid / ask) — ultimele <span id="tickcount">0</span></div>
@@ -148,6 +151,18 @@
       <code>SIMBOL_TIMEFRAME_START_FINAL.csv</code>. Orele din CSV sunt în UTC.</small>
   </form>
 </aside>
+<!-- ===== Meniul de indicatori (ascuns până apeși ƒx Indicatori) ===== -->
+<aside id="indPanel" class="panel" role="dialog" aria-label="Indicatori" hidden>
+  <div class="panelhead">
+    <h2>Indicatori</h2>
+    <button id="indClose" class="iconbtn" aria-label="Închide">✕</button>
+  </div>
+  <input id="indSearch" class="indsearch" type="search" placeholder="🔍 Caută indicator..." autocomplete="off" spellcheck="false">
+  <!-- Cartonașele indicatorilor, construite de indicators.js din lista indicatorilor înregistrați. -->
+  <div id="indList" class="indlist"></div>
+  <div class="actions"><button type="button" id="indAttach" class="primary indattach">Atașează</button></div>
+  <small id="indNote" class="tip"></small>
+</aside>
 <!-- Containerul pentru mesajele plutitoare („toast”) afișate la declanșarea unei alarme. -->
 <div id="toasts" class="toasts"></div>
 <!-- Scripturile, în ordinea obligatorie: alerts.js și push.js folosesc variabile definite în app.js. -->
@@ -155,6 +170,7 @@
 <script src="/static/alerts.js"></script>
 <script src="/static/push.js"></script>
 <script src="/static/export.js"></script>
+<script src="/static/indicators.js"></script>
 <script src="/static/trend.js"></script>
 </body>
 </html>

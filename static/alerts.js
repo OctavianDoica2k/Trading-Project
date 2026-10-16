@@ -169,11 +169,14 @@ const localY = (e) => e.clientY - candlesEl.getBoundingClientRect().top;
 // Este cursorul suficient de aproape de linia mov ca s-o apuce?
 // Toleranță: 8px cu mouse-ul, 22px cu degetul (degetul e mai puțin precis).
 function nearLine(e) {
-  if (panel.hidden || !draftLine) return false;
+  if (panel.hidden || !draftLine || onOverlay(e)) return false;
   const y = series.priceToCoordinate(draftLine.options().price);
   const tol = e.pointerType === "touch" ? 22 : 8;
   return y != null && Math.abs(localY(e) - y) <= tol;
 }
+// Controalele suprapuse peste chart (butonul „ƒx Indicatori”, sliderul Trend etc.) nu sunt
+// chartul: click-urile și dublu-click-urile pe ele nu mută / nu deschid linia de alarmă.
+const onOverlay = (e) => !!e.target.closest?.(".chartbtn, .indwidgets");
 // Apăsare lângă linie => începem tragerea.
 // (Al treilea argument, true, înseamnă „ascultă în faza de capture”.)
 candlesEl.addEventListener("pointerdown", (e) => {
@@ -376,6 +379,7 @@ window.onSymbolLoaded = () => {
 
 // Dublu-click pe chart -> deschide fereastra cu linia la prețul de acolo
 candlesEl.addEventListener("dblclick", (e) => {
+  if (onOverlay(e)) return;
   const price = series.coordinateToPrice(localY(e));
   if (price != null) openPanel(price);
 });

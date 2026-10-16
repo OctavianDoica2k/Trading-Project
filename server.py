@@ -630,6 +630,9 @@ def run_trend_analysis(bars: list[dict]) -> dict:
     return {"max": lines(ns["maxim"], ns["dr_max_valid"]),
             "min": lines(ns["minim"], ns["dr_min_valid"]),
             "pivots": {"max": len(ns["maxim"]), "min": len(ns["minim"])},
+            # Intervalul de preț al lumânărilor analizate: sliderul măsoară distanța liniilor
+            # față de prețul curent ca procent din el.
+            "range": [float(df["low"].min()), float(df["high"].max())],
             "bars": len(df)}
 
 

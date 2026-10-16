@@ -111,12 +111,73 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* Fără alarme active, bulina devine gri. */
 .badge.zero { background: var(--border); color: var(--muted); }
 
-/* ---------- Linii de trend ---------- */
-/* Butonul 📈: bulina arată câte linii sunt desenate; „busy” = calculul e în curs. */
-.trendbtn:hover, .trendbtn.on { border-color: var(--accent); }
-.trendbtn .badge { background: var(--accent); }
-.trendbtn.busy { opacity: 0.6; cursor: progress; }
-.badge[hidden] { display: none; }
+/* ---------- Indicatori ---------- */
+/* Butonul „ƒx Indicatori” (stânga sus pe chart) și controalele indicatorilor atașați (dreapta
+   sus, lângă scala de prețuri: --axis-w e setată de alerts.js). z-index: deasupra chartului. */
+.chartbtn {
+  position: absolute; top: 8px; left: 8px; z-index: 3;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; cursor: pointer; font: 600 12px/1 inherit;
+}
+.chartbtn i { color: var(--accent); font-style: italic; font-weight: 700; font-family: Georgia, serif; }
+.chartbtn:hover { border-color: var(--accent); }
+.indwidgets {
+  position: absolute; top: 8px; right: calc(var(--axis-w, 64px) + 8px); z-index: 3;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+}
+.indwidget {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 4px 3px 10px; font-size: 12px; color: var(--muted);
+}
+.indwidget .indname { color: var(--text); font-weight: 600; white-space: nowrap; }
+.indwidget input[type=range] { width: 110px; accent-color: var(--accent); margin: 0; }
+/* Căsuța cu procentul: se poate scrie direct în ea (fără săgețile implicite ale browserului). */
+.indwidget .indpct { display: inline-flex; align-items: center; gap: 1px; }
+.indwidget .indpct input {
+  width: 34px; padding: 2px 3px; text-align: right; font: 12px/1.2 inherit; font-variant-numeric: tabular-nums;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.indwidget .indpct input::-webkit-outer-spin-button,
+.indwidget .indpct input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.indwidget .indpct input:focus { outline: none; border-color: var(--accent); }
+.indwidget .badge { background: var(--accent); }
+.indwidget .iconbtn { font-size: 14px; padding: 2px 6px; }
+.indwidget.busy .indrefresh { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Fereastra „Indicatori”: căutare, cartonașe, butonul Atașează. */
+#indPanel { width: 420px; gap: 12px; }
+#indPanel .panelhead { cursor: default; }
+.indsearch {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+  padding: 9px 10px; font: 14px/1.2 inherit; width: 100%;
+}
+.indsearch:focus { outline: none; border-color: var(--accent); }
+.indlist { display: flex; flex-direction: column; gap: 8px; }
+.indcard {
+  display: flex; align-items: center; gap: 12px; text-align: left; width: 100%;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; font: inherit;
+}
+.indcard:hover { border-color: var(--muted); }
+.indcard.sel { border-color: var(--accent); background: rgba(76, 141, 255, .1); }
+.indcard.soon { opacity: .5; cursor: default; }
+.indcard.soon:hover { border-color: var(--border); }
+.indicon { font-size: 20px; width: 26px; text-align: center; flex: none; color: var(--alert); }
+.indtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.indtext b { font-size: 13px; }
+.indtext small { color: var(--muted); font-size: 11px; }
+.indtag { font-size: 10px; font-weight: 600; color: var(--up); background: rgba(38, 166, 154, .15); border-radius: 8px; padding: 1px 6px; }
+.indattach { flex: 1; }
+.indattach.danger { background: var(--down); }
+@media (max-width: 640px) {
+  .chartbtn { top: 6px; left: 6px; }
+  .indwidgets { top: 6px; right: calc(var(--axis-w, 64px) + 4px); }
+  .indwidget input[type=range] { width: 72px; }
+  #indPanel { width: auto; }
+}
 
 /* ---------- Export CSV ---------- */
 /* Butonul 💾 stă fix în colțul din dreapta sus al barei (bara îi păstrează loc în dreapta). */
