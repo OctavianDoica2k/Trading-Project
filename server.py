@@ -588,14 +588,37 @@ async def older_bars(symbol: str, tf: int, before: int):
 
 
 # ---------- Linii de trend (analysis.py) ----------
-# Butonul „📈 Trend” trimite lumânările vizibile pe chart. Rulăm pe ele partea a 2-a din
+# Indicatorul „Linii de trend” trimite ultimele lumânări de pe chart. Rulăm pe ele partea a 2-a din
 # analysis.py (după linia #----#), exact cum e scrisă: ea citește `df` și umple listele maxim,
 # minim, dr_max_valid și dr_min_valid. Fișierul e citit la fiecare cerere, deci o modificare în
 # analysis.py se vede la următoarea apăsare, fără repornirea serverului.
 ANALYSIS = Path(__file__).with_name("analysis.py")
-# Algoritmul verifică fiecare pereche de pivoturi pe toate lumânările de după ea, deci durata
-# crește foarte repede: ~6 s la 300 de lumânări, ~30 s la 500. Peste limită luăm ultimele 300.
-TREND_MAX_BARS = 300
+# Câte lumânări în spate analizează indicatorul (cele mai noi). Algoritmul verifică fiecare
+# pereche de pivoturi pe toate lumânările de după ea; cu accesul rapid de mai jos (FastFrame)
+# durează ~2–3 s la 1000 de lumânări.
+TREND_MAX_BARS = 1000
+
+
+# analysis.py citește lumânările cu df.iloc[i]['high'] de milioane de ori. Pe un DataFrame
+# pandas, fiecare astfel de citire durează ~20 µs (1000 de lumânări = minute). FastFrame oferă
+# exact aceleași citiri (len(df), df.iloc[i]['open' / 'high' / 'low' / 'close']), dar dintr-o
+# listă pregătită dinainte, de sute de ori mai repede. Valorile rămân numpy.float64, ca în
+# pandas, deci rezultatele sunt identice (inclusiv împărțirea la 0 -> inf la pivoturi egale).
+class FastFrame:
+    class _Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __getitem__(self, i):
+            return self.rows[i]
+
+    def __init__(self, df):
+        cols = {c: df[c].to_numpy() for c in ("open", "high", "low", "close")}
+        self.iloc = self._Rows([{c: a[i] for c, a in cols.items()} for i in range(len(df))])
+        self._len = len(df)
+
+    def __len__(self):
+        return self._len
 
 
 class TrendBarsIn(BaseModel):
@@ -603,6 +626,7 @@ class TrendBarsIn(BaseModel):
 
 
 def run_trend_analysis(bars: list[dict]) -> dict:
+    import numpy as np
     import pandas as pd  # doar aici, ca restul serverului să nu depindă de pandas
 
     src = ANALYSIS.read_text(encoding="utf-8")
@@ -610,8 +634,17 @@ def run_trend_analysis(bars: list[dict]) -> dict:
     if len(parts) < 2:
         raise ValueError("Nu găsesc linia #----# care separă partea a 2-a din analysis.py")
     df = pd.DataFrame(bars, columns=["time", "open", "high", "low", "close"])
-    ns = {"df": df, "pd": pd}
-    exec(compile(parts[1], str(ANALYSIS), "exec"), ns)
+    code = compile(parts[1], str(ANALYSIS), "exec")
+    # errstate: împărțirea la 0 (două pivoturi la același preț) dă inf fără avertismente în consolă.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ns = {"df": FastFrame(df), "pd": pd}
+        try:
+            exec(code, ns)
+        except (AttributeError, TypeError, KeyError):
+            # analysis.py folosește ceva ce FastFrame nu are (ex. df['close'], df.sort_values):
+            # rulăm din nou pe DataFrame-ul pandas obișnuit (mai lent, dar merge orice).
+            ns = {"df": df, "pd": pd}
+            exec(code, ns)
 
     # Fiecare dreaptă validă e o pereche (i, j) de poziții din maxim / minim; un punct e
     # (indexul lumânării în df, prețul). O desenăm de la primul punct până la ultima lumânare.
@@ -640,7 +673,7 @@ def run_trend_analysis(bars: list[dict]) -> dict:
 async def trendlines(t: TrendBarsIn):
     bars = t.bars[-TREND_MAX_BARS:]
     if len(bars) < 7:
-        raise HTTPException(400, "Sunt prea puține lumânări pe ecran (minimum 7)")
+        raise HTTPException(400, "Sunt prea puține lumânări pe chart (minimum 7)")
     try:
         # Calculul e lent și blocant: îl rulăm pe un fir separat, ca prețurile live să nu se oprească.
         result = await asyncio.to_thread(run_trend_analysis, bars)

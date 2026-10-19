@@ -3,13 +3,14 @@
 //  CE FACE ACEST FIȘIER (pe scurt)
 // -------------------------------------------------------------------------------------
 //  - Se înregistrează în meniul de indicatori (indicators.js). Când e atașat, trimite
-//    serverului lumânările vizibile pe chart (POST /api/trendlines); serverul rulează pe ele
+//    serverului ultimele TREND_BARS lumânări de pe chart (POST /api/trendlines), indiferent de
+//    zoom; dacă chartul are mai puține, cere întâi istoricul mai vechi. Serverul rulează pe ele
 //    partea a 2-a din analysis.py și întoarce dreptele valide: prin maxime (rezistențe, roșu)
 //    și prin minime (suporturi, verde).
 //  - Fiecare dreaptă e desenată ca o serie de linie, de la primul pivot, prin al doilea,
 //    până la ultima lumânare analizată.
 //  - În dreapta sus pe chart apare controlul indicatorului: sliderul de apropiere, câte linii
-//    se văd, ↻ (recalculează pe lumânările vizibile acum) și ✕ (detașează).
+//    se văd, ↻ (recalculează cu lumânările de acum) și ✕ (detașează).
 //  - Sliderul arată doar liniile apropiate de prețul curent: la N%, o linie e vizibilă dacă
 //    distanța dintre capătul ei și prețul curent e cel mult N% din intervalul de preț al
 //    lumânărilor analizate (maximul − minimul). 100% = toate. La prima atașare pornește de la 50%.
@@ -22,6 +23,8 @@
 // Valoarea sliderului e salvată în browser; dacă lipsește, e prima atașare: 50%.
 const TREND_PCT_KEY = "trend.pct";
 const TREND_DEFAULT_PCT = 50;
+// Câte lumânări în spate analizează indicatorul (aceeași limită e și pe server: TREND_MAX_BARS).
+const TREND_BARS = 1000;
 
 // Liniile desenate acum pe chart: { series, end, visible } (end = prețul liniei la ultima
 // lumânare). `trendSpan` = maximul − minimul lumânărilor analizate. `trendJob` crește la
@@ -41,7 +44,7 @@ function buildTrendWidget() {
     <label class="indpct" title="Scrie procentul (0–100)"><input type="number" min="0" max="100" step="1"
       inputmode="numeric" aria-label="Procentul de apropiere">%</label>
     <span class="badge indcount" title="Linii vizibile / linii valide">0</span>
-    <button type="button" class="iconbtn indrefresh" title="Recalculează pe lumânările vizibile">↻</button>
+    <button type="button" class="iconbtn indrefresh" title="Recalculează pe ultimele ${TREND_BARS} de lumânări">↻</button>
     <button type="button" class="iconbtn indremove" title="Detașează indicatorul">✕</button>`;
   const range = w.querySelector("input[type=range]");
   const box = w.querySelector("input[type=number]");
@@ -104,21 +107,30 @@ function drawTrendLine(line, color) {
   trendLines.push({ series: s, end: line.to.value, visible: true });
 }
 
+// Încarcă istoric mai vechi (loadOlder din app.js) până când chartul are cel puțin `n`
+// lumânări sau sursa nu mai are istoric. Se oprește și dacă o cerere nu aduce nimic nou.
+async function ensureBars(n) {
+  for (let k = 0; k < 20 && series.data().length < n && !older.done; k++) {
+    const before = series.data().length;
+    if (older.loading) { await new Promise((r) => setTimeout(r, 300)); continue; }
+    await loadOlder();
+    if (series.data().length === before) break;
+  }
+}
+
 async function loadTrendLines() {
   if (!trendWidget) return;
-  // Lumânările vizibile acum pe ecran (indexurile logice ale chartului = poziția în listă).
-  const data = series.data();
-  const range = chart.timeScale().getVisibleLogicalRange();
-  if (!data.length || !range) return;
-  const from = Math.max(0, Math.floor(range.from));
-  const to = Math.min(data.length - 1, Math.ceil(range.to));
-  const bars = data.slice(from, to + 1).map(({ time, open, high, low, close }) => ({ time, open, high, low, close }));
-
   const job = ++trendJob;
   const w = trendWidget;
   w.classList.add("busy");
   w.querySelector(".indcount").textContent = "…";
   try {
+    await ensureBars(TREND_BARS);
+    if (job !== trendJob) return;
+    // Ultimele TREND_BARS lumânări de pe chart, inclusiv cea în curs.
+    const bars = series.data().slice(-TREND_BARS)
+      .map(({ time, open, high, low, close }) => ({ time, open, high, low, close }));
+    if (!bars.length) { applyTrendFilter(); return; }
     const r = await fetch("/api/trendlines", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ bars }),
@@ -133,7 +145,7 @@ async function loadTrendLines() {
     applyTrendFilter();
     w.title = `${res.max.length} prin maxime, ${res.min.length} prin minime ` +
       `(${res.pivots.max} maxime, ${res.pivots.min} minime în ${res.bars} lumânări)` +
-      (res.truncated ? ". Doar ultimele 300 de lumânări vizibile au fost analizate." : "");
+      (res.bars < TREND_BARS ? ` — istoricul disponibil are doar ${res.bars} lumânări` : "");
   } catch (e) {
     if (job === trendJob) { toast("Linii de trend", e.message); applyTrendFilter(); }
   } finally {
@@ -145,8 +157,8 @@ registerIndicator({
   id: "trend",
   name: "Linii de trend",
   icon: "📈",
-  desc: "Drepte valide prin maxime și minime — rulează analysis.py pe lumânările vizibile",
-  note: "Se calculează pe lumânările vizibile pe chart (cel mult 300). Sliderul din dreapta sus ascunde liniile depărtate de prețul curent.",
+  desc: `Drepte valide prin maxime și minime — rulează analysis.py pe ultimele ${TREND_BARS} de lumânări`,
+  note: `Se calculează pe ultimele ${TREND_BARS} de lumânări ale timeframe-ului curent. Sliderul din dreapta sus ascunde liniile depărtate de prețul curent.`,
   attach() {
     if (trendWidget) return;
     trendWidget = buildTrendWidget();

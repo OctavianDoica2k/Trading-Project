@@ -101,10 +101,10 @@ datastore/
 - Butonul **ƒx Indicatori** din stânga sus a chartului deschide meniul: cauți indicatorul, îl selectezi
   și apeși **Atașează** (sau dublu-click pe el). Un indicator atașat rămâne pe chart și după reîncărcarea
   paginii sau schimbarea simbolului / timeframe-ului.
-- **Linii de trend**: rulează partea a 2-a din `analysis.py` pe lumânările vizibile (cel mult 300) și desenează
-  dreptele valide. În dreapta sus apare sliderul de apropiere (la prima atașare 50%): la N% se văd doar
+- **Linii de trend**: rulează partea a 2-a din `analysis.py` pe ultimele 1000 de lumânări ale timeframe-ului
+  curent (indiferent de zoom; istoricul lipsă se încarcă automat) și desenează dreptele valide. În dreapta sus apare sliderul de apropiere (la prima atașare 50%): la N% se văd doar
   liniile aflate la cel mult N% din intervalul de preț analizat față de prețul curent; 100% = toate.
-  ↻ recalculează pe lumânările vizibile acum, ✕ detașează indicatorul.
+  ↻ recalculează cu lumânările de acum, ✕ detașează indicatorul.
 - Un indicator nou se adaugă într-un fișier propriu din `static/`, cu `registerIndicator({...})`.
 
 ## Fișiere
