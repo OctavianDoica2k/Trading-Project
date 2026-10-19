@@ -34,36 +34,55 @@ def timeframe_trends_indicator(df):
 #a,b,c,d = timeframe_trends_indicator(df)
 #print(a,b,c,d)
 #-------------------------------------------------------------------------------#
-maxim = []
-minim = []
-i = 3
-while i < len(df)-3:
-    if df.iloc[i]['high'] >= df.iloc[i+1]['high'] and df.iloc[i]['high'] >= df.iloc[i+2]['high'] and df.iloc[i]['high'] >= df.iloc[i+3]['high'] and df.iloc[i]['high'] > df.iloc[i-1]['high'] and df.iloc[i]['high'] > df.iloc[i-2]['high'] and df.iloc[i]['high'] > df.iloc[i-3]['high']:
-        maxim.append((i, df.iloc[i]['high']))
+def trace(df):
+    maxim = []
+    minim = []
+    i = 3
+    while i < len(df)-3:
+        if df.iloc[i]['high'] >= df.iloc[i+1]['high'] and df.iloc[i]['high'] >= df.iloc[i+2]['high'] and df.iloc[i]['high'] >= df.iloc[i+3]['high'] and df.iloc[i]['high'] > df.iloc[i-1]['high'] and df.iloc[i]['high'] > df.iloc[i-2]['high'] and df.iloc[i]['high'] > df.iloc[i-3]['high']:
+           maxim.append((i, df.iloc[i]['high']))
         
-    if df.iloc[i]['low'] <= df.iloc[i+1]['low'] and df.iloc[i]['low'] <= df.iloc[i+2]['low'] and df.iloc[i]['low'] <= df.iloc[i+3]['low'] and df.iloc[i]['low'] < df.iloc[i-1]['low'] and df.iloc[i]['low'] < df.iloc[i-2]['low'] and df.iloc[i]['low'] < df.iloc[i-3]['low']:
-        minim.append((i, df.iloc[i]['low']))
-    i+=1
+        if df.iloc[i]['low'] <= df.iloc[i+1]['low'] and df.iloc[i]['low'] <= df.iloc[i+2]['low'] and df.iloc[i]['low'] <= df.iloc[i+3]['low'] and df.iloc[i]['low'] < df.iloc[i-1]['low'] and df.iloc[i]['low'] < df.iloc[i-2]['low'] and df.iloc[i]['low'] < df.iloc[i-3]['low']:
+            minim.append((i, df.iloc[i]['low']))
+        i+=1
 
-dr_max_valid = []
-for i in range(len(maxim)):
-    for j in range(i+1, len(maxim), 1):
-        n = maxim[i][1]
-        m = (maxim[j][0] - maxim[i][0]) / (maxim[j][1] - maxim[i][1])
-        k = maxim[i][0]
-        valid = 1
-        for l in range(maxim[i][0] + 1, len(df), 1):
-            if (l-k)/m + n < df.iloc[l]['close']: valid = 0
-        if valid == 1: dr_max_valid.append((i,j))
+    dr_max_valid = []
+    for i in range(len(maxim)):
+        for j in range(i+1, len(maxim), 1):
+            n = maxim[i][1]
+            m = (maxim[j][0] - maxim[i][0]) / (maxim[j][1] - maxim[i][1])
+            k = maxim[i][0]
+            valid = 1
+            for l in range(maxim[i][0] + 1, len(df), 1):
+                if (l-k)/m + n < df.iloc[l]['close']: valid = 0
+            if valid == 1: dr_max_valid.append((i,j))
         
 
-dr_min_valid = []
-for i in range(len(minim)):
-    for j in range(i+1, len(minim), 1):
-        n = minim[i][1]
-        m = (minim[j][0] - minim[i][0]) / (minim[j][1] - minim[i][1])
-        k = minim[i][0]
-        valid = 1
-        for l in range(minim[i][0] + 1, len(df), 1):
-            if (l-k)/m + n > df.iloc[l]['close']: valid = 0
-        if valid == 1: dr_min_valid.append((i,j))
+    dr_min_valid = []
+    for i in range(len(minim)):
+        for j in range(i+1, len(minim), 1):
+            n = minim[i][1]
+            m = (minim[j][0] - minim[i][0]) / (minim[j][1] - minim[i][1])
+            k = minim[i][0]
+            valid = 1
+            for l in range(minim[i][0] + 1, len(df), 1):
+                if (l-k)/m + n > df.iloc[l]['close']: valid = 0
+            if valid == 1: dr_min_valid.append((i,j))
+            
+    return dr_max_valid, dr_min_valid
+        
+def medie_mobila(df, period, price):
+    sma_vals = []
+    for i in range(len(df)):
+        
+        if i < period-1: sma_vals.append(None)
+        
+        elif i == period-1: 
+            val = 0 
+            for j in range(i): 
+                val += df.iloc[j][price]
+            sma_vals.append(val/period)
+            
+        else: sma_vals.append((sma_vals[len(sma_vals)-1]*period+df.iloc[i][price]-df.iloc[i-period][price])/period)
+        
+    return sma_vals
