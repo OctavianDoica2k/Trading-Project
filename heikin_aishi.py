@@ -7,13 +7,12 @@ def heikin_ashi(df):
     df_h['close'] = (df['open']+df['close']+df['high']+df['low'])/4
     
     for i in range(len(df)):
-        if i == 0: df_h.iloc[i]['open'] = (df.iloc[i]['open']+df.iloc[i]['close'])/2
-        else: df_h.iloc[i]['open'] = (df_h.iloc[i-1]['open']+df_h.iloc[i-1]['close'])/2
+        if i == 0: df_h['open'] = (df.iloc[i]['open']+df.iloc[i]['close'])/2
+        else: df_h['open'] = (df_h.iloc[i-1]['open']+df_h.iloc[i-1]['close'])/2
+    
+        df_h['high'] = max(df.iloc[i]['high'], df_h.iloc[i]['close'], df_h.iloc[i]['open'])
+        df_h['low'] = min(df.iloc[i]['low'], df_h.iloc[i]['close'], df_h.iloc[i]['open'])
         
-    df_h['high'] = max(df['high'], df_h['close'], df_h['open'])
-    
-    df_h['low'] = min(df['low'], df_h['close'], df_h['open'])
-    
     df_h['time_utc'] = df['time_utc']
     
     return df_h
