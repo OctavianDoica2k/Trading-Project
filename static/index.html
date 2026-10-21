@@ -18,11 +18,18 @@
 <!-- ===== Bara de sus: controale + cotația curentă ===== -->
 <header>
   <div class="controls">
-    <!-- Câmpul de simbol; list="symbols" îl leagă de lista de sugestii de mai jos (completată de app.js). -->
-    <input id="symbol" list="symbols" value="EURUSD" spellcheck="false" autocomplete="off">
+    <!-- Sursa prețurilor (MetaTrader 5 / cTrader); opțiunile le completează app.js din /api/sources. -->
+    <select id="source" title="Sursa prețurilor"></select>
+    <!-- Butonul simbolului: deschide meniul de simboluri (symbols.js). -->
+    <button id="symBtn" class="symbtn" title="Alege simbolul" aria-haspopup="listbox" aria-expanded="false">
+      <span id="symName">EURUSD</span><span class="caret">▾</span>
+    </button>
+    <!-- Sugestiile pentru câmpul de simbol din fereastra de export (completate de symbols.js). -->
     <datalist id="symbols"></datalist>
-    <!-- Aici app.js creează butoanele de timeframe (1s, 5s, ..., D1). -->
-    <div id="tfs" class="tfs"></div>
+    <!-- Lista de timeframe-uri (1s, 5s, ..., W1); opțiunile le creează app.js. -->
+    <select id="tf" class="hsel" title="Timeframe"></select>
+    <!-- Tipul de afișare a chartului (lumânări, Heikin-Ashi, linie...); opțiunile le creează app.js. -->
+    <select id="chartType" class="hsel" title="Tipul de afișare"></select>
     <!-- Butonul care deschide fereastra de alarme; #alertCount = numărul de alarme active. -->
     <button id="alertBtn" class="alertbtn" title="Alarme de preț">🔔<span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
   </div>
@@ -42,8 +49,12 @@
 <main>
   <!-- Chartul de lumânări (desenat de lightweight-charts în acest element). -->
   <section id="candles" class="pane">
-    <!-- Butonul din stânga sus al chartului care deschide meniul de indicatori (indicators.js). -->
-    <button id="indBtn" class="chartbtn" title="Indicatori"><i>ƒx</i> Indicatori</button>
+    <div class="chartbar">
+      <!-- Butonul din stânga sus al chartului care deschide meniul de indicatori (indicators.js). -->
+      <button id="indBtn" class="chartbtn" title="Indicatori"><i>ƒx</i> Indicatori</button>
+      <!-- Cât din datastore-ul local (simbol + timeframe) e descărcat; bara de progres (datastore.js). -->
+      <div id="storeBadge" class="storebadge" hidden><span class="sbtext"></span><div class="progress" hidden><div></div></div></div>
+    </div>
     <!-- Aici apar, în dreapta sus, controalele indicatorilor atașați (ex. sliderul Trend). -->
     <div id="indWidgets" class="indwidgets"></div>
   </section>
@@ -163,14 +174,25 @@
   <div class="actions"><button type="button" id="indAttach" class="primary indattach">Atașează</button></div>
   <small id="indNote" class="tip"></small>
 </aside>
+<!-- ===== Meniul de simboluri (deschis de butonul simbolului din bara de sus) ===== -->
+<!-- Simbolurile sursei de prețuri active, pe categorii; căutarea filtrează lista la fiecare literă. -->
+<div id="symPanel" class="sympanel" role="dialog" aria-label="Alege simbolul" hidden>
+  <input id="symSearch" class="indsearch" type="search" placeholder="🔍 Caută simbol sau descriere..." autocomplete="off" spellcheck="false">
+  <div id="symInfo" class="syminfo"></div>
+  <div id="symTree" class="symtree" role="listbox"></div>
+</div>
 <!-- Containerul pentru mesajele plutitoare („toast”) afișate la declanșarea unei alarme. -->
 <div id="toasts" class="toasts"></div>
 <!-- Scripturile, în ordinea obligatorie: alerts.js și push.js folosesc variabile definite în app.js. -->
 <script src="/static/app.js"></script>
+<script src="/static/symbols.js"></script>
 <script src="/static/alerts.js"></script>
 <script src="/static/push.js"></script>
 <script src="/static/export.js"></script>
+<script src="/static/datastore.js"></script>
 <script src="/static/indicators.js"></script>
 <script src="/static/trend.js"></script>
+<script src="/static/sma.js"></script>
+<script src="/static/mtf.js"></script>
 </body>
 </html>

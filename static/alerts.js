@@ -176,7 +176,7 @@ function nearLine(e) {
 }
 // Controalele suprapuse peste chart (butonul „ƒx Indicatori”, sliderul Trend etc.) nu sunt
 // chartul: click-urile și dublu-click-urile pe ele nu mută / nu deschid linia de alarmă.
-const onOverlay = (e) => !!e.target.closest?.(".chartbtn, .indwidgets");
+const onOverlay = (e) => !!e.target.closest?.(".chartbar, .indwidgets");
 // Apăsare lângă linie => începem tragerea.
 // (Al treilea argument, true, înseamnă „ascultă în faza de capture”.)
 candlesEl.addEventListener("pointerdown", (e) => {
@@ -349,7 +349,7 @@ function render() {
     };
     // Click pe simbol = trecem chartul pe simbolul alarmei.
     li.querySelector(".asym").onclick = () => {
-      if (a.symbol !== state.symbol) { symInput.value = a.symbol; symInput.dispatchEvent(new Event("change")); }
+      if (a.symbol !== state.symbol) selectSymbol(a.symbol);
     };
     ul.appendChild(li);
   }

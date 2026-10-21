@@ -1,0 +1,24 @@
+Bid/Ask-ul si graficul trebuie sincronizate. In ambele trebuie sa existe aceleasi timestamp. Conditie de axa X comuna.
+
+De afisat si numarul de contracte (volumul : cate contracte sunt pe bid cate pe ask). De verificat daca pot veni prin API. 
+
+O functionalitate ca sa suprapunem mai multe grafice unul peste altul. Si pe mai multe window-uri si pe acelasi chartula. De folosit linia pentru chart over chart.
+
+De decis daca implementam o baza de date.
+
+
+De implementat calendare economice. Si corelatii intre stiri si pret.
+
+
+ANDREI :
+
+De implementat Airflow/Kafca Apa(shi)
+
+
+Pentru maine : de explicat infrastructura.
+
+Cont pe DWservice (https://access.dwservice.net/login.dw?msgerr=I1Nlc3Npb25FeHBpcmVk#s) - adresa de email/user - mesaj lui vali pentru acces la masina virtuala
+
+
+
+Un algoritm de gasire de corelatii. Asset-uri legate intre ele. De exemplu granele si petrolul se misca in acelasi fel. Poate unele piete sunt corelate dar cu delay. 

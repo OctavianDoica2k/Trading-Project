@@ -9,6 +9,8 @@
 //
 //  Folosește variabilele definite în app.js: $, state, TFS.
 // =====================================================================================
+// Tot codul e într-o funcție care se execută imediat, ca variabilele de aici (panel, form,
+// showMsg...) să nu se amestece cu cele cu același nume din alerts.js.
 (() => {
   const panel = $("exportPanel");
   const form = $("exportForm");
@@ -59,6 +61,7 @@
   }
   for (const el of [eStart, eEnd, eTf]) el.addEventListener("change", updateHint);
 
+  // Mesajul de sub formular (verde = ok, roșu = eroare); poate conține HTML (link-ul de descărcare).
   function showMsg(html, ok) {
     msgEl.className = `msg ${ok ? "ok" : "err"}`;
     msgEl.innerHTML = html;
@@ -86,8 +89,9 @@
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !panel.hidden) close(); });
 
   // ---------- Exportul ----------
-  let running = false;
+  let running = false;   // un export e în curs (butonul „Exportă” e blocat)
 
+  // Butonul „Exportă”: trimite cererea serverului, apoi urmărește progresul până la final.
   form.onsubmit = async (e) => {
     e.preventDefault();
     if (running) return;

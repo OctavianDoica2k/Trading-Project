@@ -26,13 +26,16 @@ from dotenv import load_dotenv
 from ctrader import (ACCOUNT_AUTH_REQ, GET_ACCOUNTS_REQ, AuthError, Connection, CTraderError,
                      CTraderFeed, TokenStore, app_auth, refresh_token)
 
+# Consola Windows nu afișează implicit diacriticele și simbolurile (✓); trecem ieșirea pe UTF-8.
 for _stream in (sys.stdout, sys.stderr):
     _stream.reconfigure(encoding="utf-8", errors="replace")
 
-ROOT = Path(__file__).parent
-load_dotenv(ROOT / ".env")
+ROOT = Path(__file__).parent   # folderul proiectului
+load_dotenv(ROOT / ".env")     # setările din .env devin variabile de mediu (os.getenv)
+# Fișierul în care salvăm tokenul și contul ales (același pe care îl citește serverul).
 TOKEN_FILE = Path(os.getenv("CTRADER_TOKEN_FILE", ROOT / "ctrader_token.json"))
 
+# Instrucțiunile afișate când tokenurile nu sunt date în linia de comandă.
 HELP = """
 Cum obții tokenul:
   1. Intră pe https://openapi.ctrader.com/apps (logat cu cTrader ID-ul tău).
@@ -42,12 +45,16 @@ Cum obții tokenul:
 """
 
 
+# Toți pașii de configurare (vezi lista de sus). access / refresh = tokenurile din Playground,
+# symbol = simbolul cu care verificăm la final că vin prețuri live.
 async def main(access: str, refresh: str, symbol: str):
+    # Pasul 1: datele aplicației din .env.
     client_id = os.getenv("CTRADER_CLIENT_ID", "").strip()
     client_secret = os.getenv("CTRADER_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         sys.exit("Completează CTRADER_CLIENT_ID și CTRADER_CLIENT_SECRET în .env (vezi .env.example).")
 
+    # Pasul 2: tokenurile lipite. expiresAt = 0 („expirat”), pentru că nu știm încă când expiră.
     tokens = TokenStore(TOKEN_FILE)
     tokens.data = {"accessToken": access, "refreshToken": refresh, "expiresAt": 0}
 
@@ -57,7 +64,9 @@ async def main(access: str, refresh: str, symbol: str):
     try:
         await app_auth(conn, client_id, client_secret)
         print("✓ Aplicația a fost autorizată")
+        # Pasul 3: tokenuri noi + data exactă de expirare.
         await refresh_token(conn, tokens)
+        # Pasul 4: conturile cTrader la care are acces tokenul.
         res = await conn.request(GET_ACCOUNTS_REQ, {"accessToken": tokens.data["accessToken"]})
     finally:
         await conn.close()
@@ -65,6 +74,7 @@ async def main(access: str, refresh: str, symbol: str):
     accounts = res.get("ctidTraderAccount", [])
     if not accounts:
         sys.exit("Tokenul nu are acces la niciun cont. Autorizează cel puțin un cont în Playground.")
+    # Afișăm conturile numerotate de la 1 (broker, login, real / demo).
     print("\nConturi disponibile:")
     for i, a in enumerate(accounts, 1):
         kind = "REAL" if a.get("isLive") else "demo"
@@ -77,31 +87,38 @@ async def main(access: str, refresh: str, symbol: str):
         pick = input(f"\nCe cont folosim pentru prețuri? [{default}]: ").strip() or str(default)
         acc = accounts[int(pick) - 1]
 
+    # Salvăm contul ales lângă tokenuri, în ctrader_token.json.
     tokens.data.update(accountId=int(acc["ctidTraderAccountId"]), isLive=bool(acc.get("isLive")),
                        login=acc.get("traderLogin"), broker=acc.get("brokerTitleShort", ""))
     tokens.save()
     print(f"\n✓ Salvat în {TOKEN_FILE.name}")
 
-    # Verificare: ne conectăm exact ca serverul și așteptăm un preț live.
+    # Pasul 5 - verificare: ne conectăm exact ca serverul și așteptăm un preț live.
     feed = CTraderFeed(client_id, client_secret, tokens)
-    task = asyncio.create_task(feed.run())
+    task = asyncio.create_task(feed.run())   # conexiunea rulează în fundal
     try:
+        # Așteptăm cel mult 30 s să se conecteze și să încarce lista de simboluri.
         await asyncio.wait_for(feed.ready.wait(), 30)
+        # Numele simbolului la acest broker (ex. „EURUSD” poate fi „EURUSD.m”).
         name = feed.resolve(symbol)
         if name is None:
             print(f"(simbolul {symbol} nu există la acest broker; primele simboluri: "
                   f"{', '.join(feed.symbol_names()[0][:10])})")
             return
+        # Ne abonăm la prețurile simbolului și așteptăm primul preț (cel mult 10 s).
         feed.want({name})
         q = await feed.quote(name, wait=10)
         if q:
             print(f"✓ {name}: bid {q[1]}  ask {q[2]}")
         print("\nGata. Pornește serverul cu: python server.py")
     finally:
+        # Oprim conexiunea de test (serverul va deschide una proprie).
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
 
+# Rulat direct (python ctrader_setup.py): tokenurile se pot da ca argumente
+# (--access ... --refresh ...); dacă lipsesc, le cerem în consolă.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Configurarea conexiunii cu cTrader Open API")
     parser.add_argument("--access", help="Access token din Playground")

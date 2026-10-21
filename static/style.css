@@ -42,31 +42,66 @@ header {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
+/* Grupul de controale din stânga barei (sursă, simbol, timeframe, tip, alarme), pe un rând. */
 .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-/* Câmpul de simbol (textul apare mereu cu majuscule). */
-#symbol {
-  width: 120px;
+/* Butonul simbolului (deschide meniul de simboluri). */
+.symbtn {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-width: 120px; max-width: 180px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
   font: 600 14px/1 inherit;
-  text-transform: uppercase;
-}
-/* Butoanele de timeframe; cel selectat are clasa "on" (chenar albastru). */
-.tfs { display: flex; gap: 2px; }
-.tfs button {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 5px 8px;
   cursor: pointer;
-  font: 600 12px/1 inherit;
 }
-.tfs button:hover { color: var(--text); }
-.tfs button.on { color: var(--text); border-color: var(--accent); background: rgba(76, 141, 255, .12); }
+.symbtn:hover, .symbtn[aria-expanded="true"] { border-color: var(--accent); }
+.symbtn #symName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.symbtn .caret { color: var(--muted); font-size: 11px; }
+/* Meniul de simboluri: sub buton, cu căutarea sus și lista pe categorii dedesubt. */
+.sympanel {
+  position: fixed; z-index: 30;
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: min(70vh, 640px);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .55);
+  padding: 10px;
+}
+.sympanel[hidden] { display: none; }
+.syminfo { color: var(--muted); font-size: 11px; padding: 0 2px; }
+.symtree { overflow-y: auto; display: flex; flex-direction: column; min-height: 0; }
+/* Categoriile și simbolurile; --depth (setat de symbols.js) dă retragerea pe niveluri. */
+.symgroup, .symrow {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; color: var(--text); border: 0; border-radius: 6px;
+  padding: 7px 8px 7px calc(8px + var(--depth, 0) * 16px); font: inherit; cursor: pointer;
+}
+.symgroup { font-weight: 600; }
+.symgroup:hover, .symrow:hover { background: rgba(255, 255, 255, .04); }
+.symgroup .chev { color: var(--muted); font-size: 10px; width: 10px; transition: transform .15s; }
+.symgroup.open .chev { transform: rotate(90deg); }
+.symgroup .gname { flex: 1; }
+.symgroup .gcount { color: var(--muted); font-size: 11px; font-weight: 400; }
+.symrow { padding-left: calc(26px + var(--depth, 0) * 16px); }
+.symrow b { flex: none; min-width: 84px; font-size: 13px; }
+.symrow small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.symrow.cur { background: rgba(76, 141, 255, .12); }
+.symrow.cur b { color: var(--accent); }
+.symrow.active { outline: 1px solid var(--accent); outline-offset: -1px; }
+.symrow mark { background: rgba(240, 180, 41, .3); color: inherit; border-radius: 2px; }
+/* Lista sursei de prețuri (MT5 / cTrader). */
+#source, .hsel {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 600 13px/1 inherit;
+  cursor: pointer;
+}
+#source:disabled { opacity: .6; cursor: wait; }
+.hsel:hover, #source:hover { border-color: var(--accent); }
 /* Zona de cotație: fiecare valoare are deasupra o etichetă mică (.lbl). */
 .quote { display: flex; gap: 22px; align-items: flex-end; flex-wrap: wrap; }
 .px, .stat { display: flex; flex-direction: column; }
@@ -112,20 +147,42 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .badge.zero { background: var(--border); color: var(--muted); }
 
 /* ---------- Indicatori ---------- */
-/* Butonul „ƒx Indicatori” (stânga sus pe chart) și controalele indicatorilor atașați (dreapta
-   sus, lângă scala de prețuri: --axis-w e setată de alerts.js). z-index: deasupra chartului. */
-.chartbtn {
+/* Butonul „ƒx Indicatori” și starea datastore-ului (stânga sus pe chart) și controalele
+   indicatorilor atașați (dreapta sus, lângă scala de prețuri: --axis-w e setată de alerts.js).
+   z-index: deasupra chartului. */
+.chartbar {
   position: absolute; top: 8px; left: 8px; z-index: 3;
+  display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+  max-width: calc(100% - var(--axis-w, 64px) - 24px);
+}
+.chartbtn {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 10px; cursor: pointer; font: 600 12px/1 inherit;
 }
 .chartbtn i { color: var(--accent); font-style: italic; font-weight: 700; font-family: Georgia, serif; }
 .chartbtn:hover { border-color: var(--accent); }
+/* Datastore-ul local: text + bara de progres (în timpul descărcării). */
+.storebadge {
+  display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font: 12px/1 inherit; color: var(--muted); cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+.storebadge[hidden] { display: none; }
+.storebadge .sbtext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.storebadge .progress { height: 4px; min-width: 160px; }
+.storebadge.syncing { color: var(--text); border-color: var(--accent); }
+.storebadge.ready { color: var(--text); }
+.storebadge.error { color: var(--down); border-color: var(--down); }
+/* Controlul unui indicator care nu rulează pe timeframe-ul curent (1s–30s): estompat. */
+.indwidget.off { opacity: .6; }
+/* Coloana de controale ale indicatorilor, în dreapta sus, lângă scala de prețuri. */
 .indwidgets {
   position: absolute; top: 8px; right: calc(var(--axis-w, 64px) + 8px); z-index: 3;
   display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
 }
+/* Controlul unui indicator: un rând cu numele, setările, valoarea (.badge) și butoanele ↻ / ✕. */
 .indwidget {
   display: flex; align-items: center; gap: 6px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
@@ -144,17 +201,136 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .indwidget .indpct input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .indwidget .indpct input:focus { outline: none; border-color: var(--accent); }
 .indwidget .badge { background: var(--accent); }
+.indwidget .indselect {
+  padding: 2px 3px; font: 12px/1.2 inherit; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.indwidget .indselect:focus { outline: none; border-color: var(--accent); }
 .indwidget .iconbtn { font-size: 14px; padding: 2px 6px; }
+/* Cât timp serverul calculează (clasa busy), butonul ↻ se rotește continuu. */
 .indwidget.busy .indrefresh { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* „Trend multi-timeframe” (mtf.js): un card ca al celorlalți indicatori. Sus numele, marcajul de
+   aliniere, pragul și ↻ / ✕; dedesubt casetele 1D · 1W · 1M · 1Y; jos până la ce zi sunt datele.
+   Detaliile calculului apar sub card. Culoarea unei casete: --c (verde / roșu), amestecată în
+   fundal cât spune --mix (mai aprinsă spre ±100%); bara pornește din mijloc și are lungimea --w. */
+.mtfw {
+  position: relative; width: 344px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 6px 6px; font-size: 12px; color: var(--muted);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
+/* Antetul cardului și lista cu pragul (împinsă la dreapta de margin-left: auto). */
+.mtfhead { display: flex; align-items: center; gap: 6px; padding-left: 4px; }
+.mtfhead .indname { color: var(--text); font-weight: 600; white-space: nowrap; }
+.mtfhead .iconbtn { font-size: 14px; padding: 2px 6px; }
+.mtfprag {
+  margin-left: auto; padding: 2px 3px; font: 12px/1.2 inherit; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+.mtfprag:hover { border-color: var(--muted); }
+.mtfprag:focus { outline: none; border-color: var(--accent); }
+.mtfw.busy .mtfrefresh { animation: spin 1s linear infinite; }
+/* Marcajul de aliniere. */
+.mtfpill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; white-space: nowrap; cursor: default; font-variant-numeric: tabular-nums;
+}
+.mtfpill[hidden] { display: none; }
+.mtfpill.pos { color: var(--up); background: color-mix(in srgb, var(--up) 16%, transparent); }
+.mtfpill.neg { color: var(--down); background: color-mix(in srgb, var(--down) 16%, transparent); }
+.mtfpill.mix { color: var(--muted); background: rgba(125, 134, 150, .12); }
+.mtfpill .pos { color: var(--up); }
+.mtfpill .neg { color: var(--down); }
+/* Cele patru casete. */
+.mtfboxes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.mtfbox {
+  --c: var(--muted);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0;
+  padding: 6px 7px 7px; border: 1px solid transparent; border-radius: 4px; cursor: help;
+  background: color-mix(in srgb, var(--c) var(--mix, 0%), var(--bg));
+  color: var(--text); font: inherit; text-align: left;
+  transition: background .4s, border-color .15s, opacity .2s;
+}
+.mtfbox.pos { --c: var(--up); }
+.mtfbox.neg { --c: var(--down); }
+.mtfbox:hover, .mtfbox.on { border-color: color-mix(in srgb, var(--c) 55%, transparent); }
+.mtfbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mtfbox.weak { opacity: .45; }
+.mtfbox .k { font-size: 10px; font-weight: 600; letter-spacing: .06em; color: var(--muted); }
+.mtfbox .v {
+  font-size: 14px; font-weight: 600; line-height: 1.1; white-space: nowrap; font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--c) 75%, #fff);
+}
+.mtfbox.empty .v { color: var(--muted); }
+/* Bara: linia din mijloc = 0%; umplerea merge spre dreapta (creștere) sau spre stânga (scădere).
+   Cu un prag ales, cele două linii verticale arată pragul (în interiorul lor = sub prag). */
+.mtfbar { position: relative; align-self: stretch; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, .07); }
+.mtfbar::before {
+  content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: rgba(255, 255, 255, .25);
+}
+.mtfbar i {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: var(--w, 0%);
+  background: var(--c); border-radius: 0 2px 2px 0; transition: width .4s;
+}
+.mtfbox.neg .mtfbar i { left: auto; right: 50%; border-radius: 2px 0 0 2px; }
+.mtfw.prag .mtfbar::after {
+  content: ""; position: absolute; top: -2px; bottom: -2px; left: calc(50% - var(--t)); right: calc(50% - var(--t));
+  border-left: 1px solid var(--muted); border-right: 1px solid var(--muted);
+}
+/* În timpul pregătirii: procentele și barele pulsează în gri. */
+.mtfw.loading .mtfbox .v { color: transparent; background: rgba(255, 255, 255, .07); border-radius: 3px; }
+.mtfw.loading .mtfbox .v, .mtfw.loading .mtfbar { animation: mtfpulse 1.2s ease-in-out infinite; }
+@keyframes mtfpulse { 50% { opacity: .4; } }
+/* Rândul de jos: punctul verde = date la zi, albastru pulsând = se pregătesc, roșu = eroare. */
+.mtfstat {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 5px 4px 0; border-top: 1px solid var(--border); font-size: 11px;
+}
+.mtfstat::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--up); }
+.mtfstat.load::before { background: var(--accent); animation: mtfpulse 1s ease-in-out infinite; }
+.mtfstat.err::before { background: var(--down); }
+.mtftext { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+.mtftext b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.mtfstat.err .mtftext { color: var(--down); white-space: normal; }
+/* Detaliile unei casete. */
+.mtftip {
+  position: absolute; top: calc(100% + 6px); right: 0; width: 100%; z-index: 4;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+  font-size: 12px; color: var(--text); box-shadow: 0 10px 28px rgba(0, 0, 0, .5);
+}
+.mtftip[hidden] { display: none; }
+.mtftip .h {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 6px; padding-bottom: 7px; border-bottom: 1px solid var(--border);
+}
+.mtftip .h span { flex: 1; color: var(--muted); font-size: 11px; }
+.mtftip .h b:last-child:not(:first-child) { font-size: 13px; font-variant-numeric: tabular-nums; }
+.mtftip .r { display: flex; justify-content: space-between; padding: 1px 0; color: var(--muted); }
+.mtftip .r span:last-child { color: var(--text); }
+.mtftip .r span:last-child, .mtftip .f { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.mtftip .f { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.mtftip .f.err { color: var(--down); font-family: inherit; }
+.mtftip .pos { color: var(--up); }
+.mtftip .neg { color: var(--down); }
+.mtftip .n { margin-top: 6px; font-size: 10.5px; color: var(--muted); }
+/* Iconița din fereastra „Indicatori”: patru pătrățele, ca pe card. */
+.mtfico { display: inline-grid; grid-template-columns: repeat(2, 9px); gap: 2px; vertical-align: middle; }
+.mtfico i { width: 9px; height: 9px; border-radius: 2px; }
+.mtfico .pos { background: var(--up); }
+.mtfico .neg { background: var(--down); }
+.mtfico .weak { opacity: .45; }
 /* Fereastra „Indicatori”: căutare, cartonașe, butonul Atașează. */
 #indPanel { width: 420px; gap: 12px; }
 #indPanel .panelhead { cursor: default; }
+/* Căsuța de căutare (folosită și în meniul de simboluri). */
 .indsearch {
   background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
   padding: 9px 10px; font: 14px/1.2 inherit; width: 100%;
 }
 .indsearch:focus { outline: none; border-color: var(--accent); }
+/* Cartonașele indicatorilor: .sel = selectat (albastru), .soon = locul „Alți indicatori” (estompat). */
 .indlist { display: flex; flex-direction: column; gap: 8px; }
 .indcard {
   display: flex; align-items: center; gap: 12px; text-align: left; width: 100%;
@@ -169,14 +345,27 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .indtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .indtext b { font-size: 13px; }
 .indtext small { color: var(--muted); font-size: 11px; }
+/* Eticheta verde „atașat” / „2 pe chart” de lângă numele indicatorului. */
 .indtag { font-size: 10px; font-weight: 600; color: var(--up); background: rgba(38, 166, 154, .15); border-radius: 8px; padding: 1px 6px; }
+/* Butonul Atașează pe toată lățimea; roșu când devine „Detașează”. */
 .indattach { flex: 1; }
 .indattach.danger { background: var(--down); }
+/* Indicatorii pe telefon (ecran de cel mult 640px): totul mai compact. */
 @media (max-width: 640px) {
-  .chartbtn { top: 6px; left: 6px; }
+  .chartbar { top: 6px; left: 6px; }
   .indwidgets { top: 6px; right: calc(var(--axis-w, 64px) + 4px); }
   .indwidget input[type=range] { width: 72px; }
   #indPanel { width: auto; }
+  /* Casetele nu încap lângă butonul Indicatori și starea datastore-ului: le punem sub ele. */
+  .indwidgets:has(.mtfw) { top: 80px; }
+  /* Cardul mai îngust: fără nume (rămân marcajul, pragul și butoanele), casete mai mici. */
+  .mtfw { width: 284px; }
+  .mtfhead { padding-left: 0; gap: 4px; }
+  .mtfhead .indname { display: none; }
+  .mtfboxes { gap: 3px; }
+  .mtfbox { padding: 5px 4px 6px; gap: 3px; }
+  .mtfbox .v { font-size: 12px; }
+  .mtftip { width: min(300px, calc(100vw - var(--axis-w, 64px) - 16px)); }
 }
 
 /* ---------- Export CSV ---------- */
@@ -195,8 +384,10 @@ header { position: relative; padding-right: 150px; }
 .progress div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 .msg a { color: var(--accent); font-weight: 600; }
 .primary:disabled { opacity: .55; cursor: default; }
+/* Căile de fișiere lungi se rup pe mai multe rânduri, în loc să iasă din fereastră. */
 code { word-break: break-all; }
 
+/* ---------- Ferestrele plutitoare (alarme, export, indicatori) ---------- */
 .panel {
   /* Fereastră plutitoare centrată pe zona chartului (fără scala de prețuri din dreapta). */
   /* position: fixed = rămâne pe loc pe ecran; z-index: 20 = deasupra charturilor. */
@@ -227,6 +418,7 @@ code { word-break: break-all; }
 .panelhead .iconbtn { margin-left: auto; }
 .draghint { color: var(--muted); font-size: 10px; }
 .panelhead h2 { margin: 0; font-size: 15px; }
+/* Butoanele mici, doar cu un simbol (✕, ↻): fără chenar, cu fundal la trecerea mouse-ului. */
 .iconbtn {
   background: transparent; border: 0; color: var(--muted);
   font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 4px;
@@ -335,10 +527,12 @@ code { word-break: break-all; }
   header { padding: 8px 12px; gap: 8px; }
   /* Controalele pe un singur rând; butoanele de timeframe se derulează orizontal, fără bară vizibilă. */
   .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
-  #symbol { width: 92px; flex: none; font-size: 13px; padding: 6px; }
-  .tfs { overflow-x: auto; flex: 1; scrollbar-width: none; }
-  .tfs::-webkit-scrollbar { display: none; }
-  .tfs button { padding: 6px 7px; flex: none; }
+  .symbtn { min-width: 0; max-width: 112px; flex: none; font-size: 13px; padding: 6px; gap: 4px; }
+  .symrow, .symgroup { padding-top: 9px; padding-bottom: 9px; }
+  #symSearch { font-size: 16px; } /* fără zoom automat pe iOS */
+  #source { flex: none; max-width: 84px; font-size: 12px; padding: 6px 4px; }
+  .hsel { flex: none; font-size: 12px; padding: 6px 4px; }
+  #chartType { min-width: 0; flex: 1; }
   /* Pe telefon butonul de alarme arată doar 🔔 și numărul (textul „Alarme” se ascunde). */
   .alertbtn { flex: none; padding: 6px 8px; gap: 4px; }
   .alertbtn .btntxt { display: none; }

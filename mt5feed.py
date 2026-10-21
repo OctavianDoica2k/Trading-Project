@@ -2,7 +2,7 @@
 Sursă de prețuri din MetaTrader 5 (ex. FBS): terminalul MT5 trebuie să fie pornit și logat pe PC.
 
 Are aceeași interfață ca CTraderFeed (ctrader.py), ca server.py să poată folosi oricare dintre ele
-(se alege cu PRICE_SOURCE în .env).
+(se alege din pagină sau cu PRICE_SOURCE în .env).
 """
 # =====================================================================================
 #  CE FACE ACEST FIȘIER (pe scurt)
@@ -13,13 +13,18 @@ Are aceeași interfață ca CTraderFeed (ctrader.py), ca server.py să poată fo
 #  - Oferă istoricul (ticuri, lumânări) și informațiile simbolurilor, la cerere.
 #
 #  Ora: MT5 dă timpii în ora SERVERULUI brokerului (la FBS UTC+2 iarna, UTC+3 vara), scrisă ca
-#  și cum ar fi UTC. Restul aplicației lucrează în UTC real, așa că scădem diferența (o aflăm
-#  comparând cel mai recent tic cu ora reală, vezi _estimate_offset).
+#  și cum ar fi UTC. Restul aplicației lucrează în UTC real, așa că fiecare oră se convertește
+#  SEPARAT, după regula de fus orar a brokerului (MT5_SERVER_TZ, implicit Europe/Athens = regula
+#  FBS: ora de vară între ultima duminică din martie și ultima duminică din octombrie). Astfel o
+#  lumânare din ianuarie primește −2 ore, iar una din iulie −3, oricând ar fi cerută.
 # =====================================================================================
 import asyncio
+import functools
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import MetaTrader5 as mt5
 
@@ -38,6 +43,42 @@ TIMEFRAMES = {
 # Tools > Options > Charts > Max bars in chart = Unlimited (și repornit terminalul).
 TICK_FALLBACK = {60, 300}
 
+# Fusul orar al serverului MT5: un nume IANA (ex. Europe/Athens, America/New_York) sau o diferență
+# fixă (ex. UTC+3). Implicit regula FBS (verificată pe istoric: +2 iarna, +3 vara, ca în UE).
+DEFAULT_SERVER_TZ = "Europe/Athens"
+
+
+# Transformă textul din MT5_SERVER_TZ într-un fus orar Python. Text gol = DEFAULT_SERVER_TZ.
+def parse_zone(text: str):
+    text = text.strip() or DEFAULT_SERVER_TZ
+    up = text.upper().replace(" ", "")
+    # „UTC+3” / „GMT-5”: diferență fixă, fără oră de vară.
+    if up.startswith(("UTC", "GMT")) and up[3:4] in ("+", "-"):
+        return timezone(timedelta(hours=float(up[3:])))
+    # Altfel: nume IANA („Europe/Athens”), care știe singur regulile de oră de vară.
+    try:
+        return ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ValueError(f"MT5_SERVER_TZ necunoscut: {text} (ex. Europe/Athens sau UTC+3)") from e
+
+
+# Diferența (secunde) dintre ora serverului și UTC, pentru ora (întreagă) `hour` a serverului,
+# respectiv a UTC. Trecerile la ora de vară / iarnă se fac la ore întregi, deci o valoare pe oră e
+# exactă; lru_cache le ține minte (conversia se face pentru fiecare tic și fiecare lumânare).
+@functools.lru_cache(maxsize=200_000)
+def _offset_at_server_hour(tz, hour: int) -> int:
+    wall = datetime(1970, 1, 1) + timedelta(hours=hour)
+    # Ora care se repetă toamna (fold=0) primește diferența de vară; ora care lipsește primăvara
+    # (piața e oricum închisă duminica la 03:00) primește diferența de dinainte de trecere.
+    return int(wall.replace(tzinfo=tz).utcoffset().total_seconds())
+
+
+# Același lucru, dar pornind de la o oră UTC (folosit la conversia UTC -> ora serverului).
+@functools.lru_cache(maxsize=200_000)
+def _offset_at_utc_hour(tz, hour: int) -> int:
+    return int(datetime.fromtimestamp(hour * 3600, tz).utcoffset().total_seconds())
+
+
 # Pachetul MetaTrader5 nu e garantat thread-safe: toate apelurile trec prin acest lock.
 # Un „lock” (lacăt) asigură că un singur fir de execuție vorbește cu MT5 la un moment dat.
 mt5_lock = threading.Lock()
@@ -55,31 +96,38 @@ class MT5Feed:
         self._lookup: dict[str, str] = {}
         self._visible: list[str] = []
         self._all: list[str] = []
+        # Meniul de simboluri: [{"s": nume, "d": descriere, "g": [categorie, subcategorie...]}]
+        self._tree: list[dict] = []
         self._details: dict[str, dict] = {}
         # Ultimul preț [timp_ms, bid, ask] (în UTC) al fiecărui simbol urmărit.
         self.quotes: dict[str, list] = {}
         self.wanted: set[str] = set()
         self._want_raw: set[str] = set()
-        # Diferența (secunde) dintre ora serverului MT5 și UTC. Se poate fixa din .env, altfel
-        # se estimează automat.
-        fixed = os.getenv("MT5_UTC_OFFSET_HOURS", "").strip()
-        self._fixed_offset = int(float(fixed) * 3600) if fixed else None
-        self.offset = self._fixed_offset or 0
+        # Fusul orar al serverului MT5 (regula de conversie, aplicată fiecărei ore în parte).
+        self.tz = parse_zone(os.getenv("MT5_SERVER_TZ", ""))
         self._lost: asyncio.Event | None = None
         self._stop = threading.Event()
 
     # ---------- Conversii de timp ----------
+    # Ora serverului (secunde) -> UTC (secunde), cu diferența valabilă la acea oră.
+    def _srv_to_utc_s(self, server_s: int) -> int:
+        server_s = int(server_s)
+        return server_s - _offset_at_server_hour(self.tz, server_s // 3600)
+
+    # Ora serverului (milisecunde) -> UTC (milisecunde); pentru ticuri.
     def _to_utc_ms(self, server_ms: int) -> int:
-        return int(server_ms) - self.offset * 1000
+        server_ms = int(server_ms)
+        return server_ms - _offset_at_server_hour(self.tz, server_ms // 3_600_000) * 1000
 
+    # UTC (milisecunde) -> ora serverului (secunde): forma în care MT5 primește intervalele cerute.
     def _to_server_s(self, utc_ms: int) -> int:
-        return int(utc_ms // 1000) + self.offset
+        s = int(utc_ms // 1000)
+        return s + _offset_at_utc_hour(self.tz, s // 3600)
 
-    # Ora serverului MT5 față de UTC: cel mai recent tic din Market Watch ar trebui să fie „acum”
-    # (la crypto, chiar și în weekend). Diferența, rotunjită la jumătate de oră, e fusul orar.
-    def _estimate_offset(self):
-        if self._fixed_offset is not None:
-            return
+    # Verificare: cel mai recent tic din Market Watch ar trebui să fie „acum” (la crypto, chiar și
+    # în weekend). Dacă diferența lui față de ora reală nu e cea dată de MT5_SERVER_TZ, fusul orar
+    # setat e greșit și orele lumânărilor ar fi decalate: afișăm un avertisment.
+    def _check_zone(self):
         newest = 0
         for name in self._visible:
             tick = mt5.symbol_info_tick(name)
@@ -88,29 +136,42 @@ class MT5Feed:
         if not newest:
             return
         diff = newest - time.time()
-        offset = round(diff / 1800) * 1800
-        # Acceptăm estimarea doar dacă ultimul tic e recent (cel mult 10 minute „vechime”).
-        if abs(diff - offset) < 600:
-            if offset != self.offset:
-                print(f"[MT5] ora serverului: UTC{offset / 3600:+g}")
-            self.offset = offset
+        # Diferența observată, rotunjită la jumătate de oră (unele fusuri au +x:30).
+        seen = round(diff / 1800) * 1800
+        # Doar dacă ultimul tic e recent (cel mult 10 minute „vechime”).
+        if abs(diff - seen) >= 600:
+            return
+        rule = _offset_at_utc_hour(self.tz, int(time.time()) // 3600)
+        if seen != rule:
+            print(f"[MT5] ATENȚIE: ora serverului pare UTC{seen / 3600:+g}, dar MT5_SERVER_TZ="
+                  f"{self.tz} dă UTC{rule / 3600:+g}; corectează MT5_SERVER_TZ în .env")
 
     # ---------- Simboluri ----------
+    # Forma „normalizată” a unui nume, pentru căutare: „eur/usd” și „EUR USD” devin „EURUSD”.
     @staticmethod
     def _norm(name: str) -> str:
         return name.upper().replace("/", "").replace(" ", "")
 
+    # Numele exact al simbolului în terminal, pornind de la ce a scris utilizatorul (sau None).
     def resolve(self, name: str) -> str | None:
         return self._lookup.get(self._norm(name))
 
+    # (simbolurile din Market Watch, toate simbolurile terminalului).
     def symbol_names(self) -> tuple[list[str], list[str]]:
         return list(self._visible), list(self._all)
 
+    # Simbolurile cu categoria lor, pentru meniul de simboluri (în ordinea din terminal).
+    def symbol_tree(self) -> list[dict]:
+        return list(self._tree)
+
+    # Zecimalele, pasul minim (point) și descrierea unui simbol (cerute o dată, apoi păstrate).
     async def info(self, name: str) -> dict:
         if name in self._details:
             return self._details[name]
         self._check_ready()
 
+        # Apelurile MT5 sunt blocante: le rulăm într-un fir separat (asyncio.to_thread), ca bucla
+        # serverului să nu stea pe loc. La fel în toate funcțiile de mai jos.
         def get():
             with mt5_lock:
                 # symbol_select îl adaugă în Market Watch (altfel MT5 nu dă cotații pentru el).
@@ -124,15 +185,19 @@ class MT5Feed:
         self._details[name] = d
         return d
 
+    # Aruncă ConnectionError dacă nu suntem atașați la terminal.
     def _check_ready(self):
         if not self.ready.is_set():
             raise ConnectionError("Nu sunt conectat la MT5")
 
     # ---------- Prețuri ----------
+    # Setează simbolurile urmărite; firul de interogare (_poll_loop) citește self.wanted.
     def want(self, names: set[str]):
         self._want_raw = set(names)
         self.wanted = {r for n in names if (r := self.resolve(n))}
 
+    # Ultimul preț [timp_ms UTC, bid, ask]: din prețurile live, sau cerut direct terminalului.
+    # `wait` nu e folosit aici (există pentru compatibilitate cu CTraderFeed).
     async def quote(self, name: str, wait: float = 3.0) -> list | None:
         if name in self.quotes:
             return list(self.quotes[name])
@@ -203,7 +268,7 @@ class MT5Feed:
         bars = self._bars(rates, start_ms, end_ms)
         # Partea mai veche decât istoricul terminalului se construiește din ticuri (M1/M5).
         if tf in TICK_FALLBACK:
-            native = (int(first[0]["time"]) - self.offset) * 1000 if first is not None and len(first) else end_ms
+            native = self._srv_to_utc_s(first[0]["time"]) * 1000 if first is not None and len(first) else end_ms
             if native > start_ms:
                 stop = min(end_ms, native)
                 older = await asyncio.to_thread(self._tick_bars, name, tf, start_ms, stop)
@@ -218,7 +283,7 @@ class MT5Feed:
         out: list[dict] = []
         t = start_ms
         while t < end_ms:
-            to = min(t + 3600_000, end_ms)
+            to = min(t + 3600_000, end_ms)   # următoarea bucată de cel mult o oră
             with mt5_lock:
                 ticks = mt5.copy_ticks_range(name, self._to_server_s(t), self._to_server_s(to) + 1,
                                              mt5.COPY_TICKS_INFO)
@@ -228,11 +293,14 @@ class MT5Feed:
             # Doar ticurile care schimbă bid-ul (așa își calculează MT5 lumânările și volumul).
             ticks = ticks[(ticks["bid"] > 0) & ((ticks["flags"] & mt5.TICK_FLAG_BID) != 0)]
             for msc, bid in zip(ticks["time_msc"].tolist(), ticks["bid"].tolist()):
-                utc = msc - self.offset * 1000
+                utc = self._to_utc_ms(msc)
                 if not start_ms <= utc < end_ms:
                     continue
-                bt = msc // 1000 // tf * tf - self.offset
+                # Ora deschiderii lumânării din care face parte ticul: rotunjim în jos la tf
+                # secunde în ora serverului, apoi convertim în UTC.
+                bt = self._srv_to_utc_s(msc // 1000 // tf * tf)
                 b = out[-1] if out else None
+                # Același interval ca ultima lumânare: o actualizăm; altfel începem una nouă.
                 if b and b["time"] == bt:
                     b["high"] = max(b["high"], bid)
                     b["low"] = min(b["low"], bid)
@@ -249,7 +317,7 @@ class MT5Feed:
             return []
         out = []
         for r in rates:
-            t = int(r["time"]) - self.offset
+            t = self._srv_to_utc_s(r["time"])
             if t * 1000 < start_ms or (end_ms is not None and t * 1000 >= end_ms):
                 continue
             out.append({"time": t, "open": float(r["open"]), "high": float(r["high"]),
@@ -267,6 +335,7 @@ class MT5Feed:
             if not ok:
                 await asyncio.sleep(5)
                 continue
+            # Conectat: pornim firul de interogare și așteptăm până anunță că s-a pierdut legătura.
             self._lost = asyncio.Event()
             self._stop.clear()
             self.ready.set()
@@ -297,12 +366,13 @@ class MT5Feed:
             self._all = [s.name for s in syms]
             self._visible = [s.name for s in syms if s.visible]
             self._lookup = {self._norm(n): n for n in self._all}
+            # Categoria = folderul simbolului din terminal (ex. „Forex\Main\EURUSD” -> Forex / Main).
+            self._tree = [{"s": s.name, "d": s.description or "",
+                           "g": [p for p in s.path.split("\\")[:-1] if p] or ["Altele"]} for s in syms]
             self._details.clear()
-            self._estimate_offset()
-        print(f"[MT5] conectat: {acc.server} / {acc.login}" if acc else "[MT5] conectat")
-        if self._fixed_offset is None and self.offset == 0:
-            print("[MT5] nu am putut afla ora serverului (piață închisă?); "
-                  "o poți fixa în .env cu MT5_UTC_OFFSET_HOURS")
+            self._check_zone()
+        print(f"[MT5] conectat: {acc.server} / {acc.login} (ora serverului: {self.tz})"
+              if acc else "[MT5] conectat")
         return True
 
     # Firul de interogare: la fiecare 10 ms cere ticurile noi ale simbolurilor urmărite.
@@ -322,15 +392,15 @@ class MT5Feed:
                     self._poll_symbol(sym, last_msc)
                 except Exception as e:  # noqa: BLE001 - firul nu trebuie să moară
                     print(f"[MT5] eroare la {sym}: {e}")
-            # O dată pe secundă: terminalul mai e conectat? (și, la 10 minute, recalculăm ora
-            # serverului: se schimbă la trecerea pe ora de vară/iarnă)
+            # O dată pe secundă: terminalul mai e conectat? (și, la 10 minute, verificăm că ora
+            # serverului e cea dată de MT5_SERVER_TZ)
             if time.monotonic() >= next_check:
                 next_check = time.monotonic() + 1
                 with mt5_lock:
                     alive = mt5.terminal_info() is not None
                     if alive and time.monotonic() >= next_offset:
                         next_offset = time.monotonic() + 600
-                        self._estimate_offset()
+                        self._check_zone()
                 if not alive:
                     self.loop.call_soon_threadsafe(self._lost.set)
                     return
@@ -356,10 +426,11 @@ class MT5Feed:
             ticks = mt5.copy_ticks_from(symbol, last // 1000, 2000, mt5.COPY_TICKS_ALL)
         if ticks is None or len(ticks) == 0:
             return
-        new = ticks[ticks["time_msc"] > last]
+        new = ticks[ticks["time_msc"] > last]   # doar ticurile de după ultimul trimis
         if len(new) == 0:
             return
         last_msc[symbol] = int(new["time_msc"][-1])
+        # Convertim în [timp_ms UTC, bid, ask] și le predăm buclei asyncio (suntem în alt fir).
         data = [[self._to_utc_ms(t["time_msc"]), float(t["bid"]), float(t["ask"])] for t in new]
         self.loop.call_soon_threadsafe(self._emit, symbol, data)
 

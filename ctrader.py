@@ -52,6 +52,8 @@ HEARTBEAT = 51
 APP_AUTH_REQ = 2100
 ACCOUNT_AUTH_REQ = 2102
 SYMBOLS_LIST_REQ = 2114
+ASSET_CLASS_LIST_REQ = 2153
+SYMBOL_CATEGORY_REQ = 2160
 SYMBOL_BY_ID_REQ = 2116
 SYMBOL_CHANGED_EVENT = 2120
 SUBSCRIBE_SPOTS_REQ = 2127
@@ -117,12 +119,14 @@ class Connection:
         self._hist_lock = asyncio.Lock()
         self._hist_next = 0.0
 
+    # Deschide conexiunea și pornește în fundal cititorul de mesaje și heartbeat-ul.
     async def open(self):
         # max_size: lista de simboluri poate avea câțiva MB; limita implicită (1 MB) e prea mică.
         self.ws = await websockets.connect(self.url, max_size=64 * 2**20, open_timeout=15)
         self._reader = asyncio.create_task(self._read())
         self._heartbeat = asyncio.create_task(self._beat())
 
+    # Închide conexiunea: oprește heartbeat-ul, închide WebSocket-ul și așteaptă cititorul să termine.
     async def close(self):
         if self._heartbeat:
             self._heartbeat.cancel()
@@ -194,7 +198,10 @@ class Connection:
                 await asyncio.sleep(float(e.retry_after or 1))
         raise AssertionError("unreachable")
 
+    # O singură încercare: trimite cererea cu un clientMsgId nou și așteaptă răspunsul cu același id
+    # (îl pune _read() în Future-ul din pending).
     async def _request_once(self, pt: int, payload: dict, timeout: float) -> dict:
+        # Cererile de istoric așteaptă rândul, ca să nu depășim 5 cereri/s (vezi HIST_INTERVAL).
         if pt in HISTORICAL:
             async with self._hist_lock:
                 wait = self._hist_next - time.monotonic()
@@ -226,18 +233,22 @@ class TokenStore:
         if path.exists():
             self.data = json.loads(path.read_text(encoding="utf-8"))
 
+    # True dacă ctrader_setup.py a fost rulat (avem token și cont ales).
     @property
     def configured(self) -> bool:
         return bool(self.data.get("accessToken") and self.data.get("accountId"))
 
+    # Id-ul contului cTrader ales la configurare.
     @property
     def account_id(self) -> int:
         return int(self.data["accountId"])
 
+    # True = cont real (server live), False = cont demo.
     @property
     def is_live(self) -> bool:
         return bool(self.data.get("isLive"))
 
+    # True dacă tokenul expiră în mai puțin de REFRESH_MARGIN (3 zile) - e timpul să-l reînnoim.
     def expires_soon(self) -> bool:
         return self.data.get("expiresAt", 0) - time.time() < REFRESH_MARGIN
 
@@ -248,6 +259,7 @@ class TokenStore:
                          expiresAt=int(time.time()) + int(expires_in))
         self.save()
 
+    # Scrie self.data pe disc (fișier temporar, apoi redenumire).
     def save(self):
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
@@ -322,6 +334,8 @@ class CTraderFeed:
         self.symbols: dict[str, dict] = {}
         self._lookup: dict[str, str] = {}
         self._by_id: dict[int, str] = {}
+        # Meniul de simboluri: [{"s": nume, "d": descriere, "g": [clasa de active, categoria]}]
+        self._tree: list[dict] = []
         # Detaliile complete (zecimale etc.), cerute doar pentru simbolurile folosite.
         self._details: dict[str, dict] = {}
         # Ultimul preț complet [timp_ms, bid, ask] al fiecărui simbol la care suntem abonați.
@@ -337,6 +351,7 @@ class CTraderFeed:
         self._wake = asyncio.Event()
 
     # ---------- Simboluri ----------
+    # Forma „normalizată” a unui nume, pentru căutare: „eur/usd” și „EUR USD” devin „EURUSD”.
     @staticmethod
     def _norm(name: str) -> str:
         return name.upper().replace("/", "").replace(" ", "")
@@ -350,6 +365,10 @@ class CTraderFeed:
         items = sorted(self.symbols.values(), key=lambda s: s.get("sortingNumber", 1e18))
         return ([s["symbolName"] for s in items if s.get("enabled", True)],
                 [s["symbolName"] for s in items])
+
+    # Simbolurile cu categoria lor, pentru meniul de simboluri.
+    def symbol_tree(self) -> list[dict]:
+        return list(self._tree)
 
     # Zecimalele, pasul minim și descrierea unui simbol (cerute o singură dată, apoi păstrate).
     async def info(self, name: str) -> dict:
@@ -367,6 +386,7 @@ class CTraderFeed:
         self._details[name] = d
         return d
 
+    # Conexiunea curentă, gata de cereri; aruncă ConnectionError dacă suntem deconectați.
     def _conn(self) -> Connection:
         if not self.ready.is_set() or self.conn is None:
             raise ConnectionError("Nu sunt conectat la cTrader")
@@ -377,6 +397,7 @@ class CTraderFeed:
     # Poate fi apelată oricând, chiar înainte de conectare.
     def want(self, names: set[str]):
         self._want_raw = set(names)
+        # Numele exacte la broker, fără simbolurile la care abonarea a eșuat deja.
         wanted = {r for n in names if (r := self.resolve(n)) and r not in self._failed}
         self.wanted = wanted
         if wanted != self.subscribed:
@@ -391,6 +412,7 @@ class CTraderFeed:
             await asyncio.sleep(0.05)
         if name in self.quotes:
             return list(self.quotes[name])
+        # Nu avem preț live: căutăm ultimul bid și ultimul ask din ultimele 7 zile de ticuri.
         end = int(time.time() * 1000)
         bid = await self.ticks(name, "BID", end - 7 * 86400_000, end, max_pages=1)
         ask = await self.ticks(name, "ASK", end - 7 * 86400_000, end, max_pages=1)
@@ -398,6 +420,8 @@ class CTraderFeed:
             return None
         return [max(bid[-1][0], ask[-1][0]), bid[-1][1], ask[-1][1]]
 
+    # Mesajele trimise de server din proprie inițiativă (nu răspunsuri): prețuri noi, simboluri
+    # modificate, sesiune închisă.
     def _on_event(self, pt: int, p: dict):
         if pt == SPOT_EVENT:
             self._on_spot(p)
@@ -420,6 +444,7 @@ class CTraderFeed:
             return
         prev = self.quotes.get(name) or self._partial.get(name) or [0, 0.0, 0.0]
         digits = self._details[name]["digits"] if name in self._details else 5
+        # [timp_ms, bid, ask]: latura care lipsește din eveniment o luăm din prețul anterior.
         q = [int(p.get("timestamp") or time.time() * 1000),
              round(int(p["bid"]) / PRICE_SCALE, digits) if "bid" in p else prev[1],
              round(int(p["ask"]) / PRICE_SCALE, digits) if "ask" in p else prev[2]]
@@ -435,8 +460,10 @@ class CTraderFeed:
     async def _sync_loop(self, conn: Connection):
         acc = self.tokens.account_id
         while True:
+            # Dormim până când want() anunță o schimbare.
             await self._wake.wait()
             self._wake.clear()
+            # Simbolurile care nu mai sunt dorite: dezabonare.
             for name in self.subscribed - self.wanted:
                 self.subscribed.discard(name)
                 self.quotes.pop(name, None)
@@ -445,6 +472,7 @@ class CTraderFeed:
                         "ctidTraderAccountId": acc, "symbolId": [self.symbols[name]["symbolId"]]})
                 except CTraderError as e:
                     print(f"[cTrader] dezabonare {name}: {e}")
+            # Simbolurile dorite la care nu suntem încă abonați: abonare.
             for name in self.wanted - self.subscribed:
                 try:
                     info = await self.info(name)   # zecimalele, pentru rotunjirea prețurilor
@@ -475,7 +503,7 @@ class CTraderFeed:
             res = await conn.request(GET_TICKDATA_REQ, {
                 "ctidTraderAccountId": self.tokens.account_id, "symbolId": info["id"],
                 "type": side, "fromTimestamp": start_ms, "toTimestamp": to})
-            page = decode_ticks(res.get("tickData") or [])
+            page = decode_ticks(res.get("tickData") or [])   # bucata primită, decodată
             out.extend(page)
             if not res.get("hasMore") or not page:
                 break
@@ -484,6 +512,8 @@ class CTraderFeed:
             if to <= start_ms:
                 break
         d = info["digits"]
+        # Mulțimea {...} elimină ticurile duplicate (bucățile se pot suprapune), sorted le pune
+        # în ordine cronologică.
         return sorted({(t, round(p, d)) for t, p in out})
 
     # Ultimele `count` lumânări gata calculate de cTrader (M1 și peste), deschise înainte de end_ms.
@@ -493,6 +523,7 @@ class CTraderFeed:
         bars: list[dict] = []
         to, empty = end_ms, 0
         while len(bars) < count and empty < 5 and to > 0:
+            # Bucata dinaintea lui `to`, lungă de BARS_CHUNK lumânări; o lipim în fața celor avute.
             frm = max(0, to - tf * 1000 * BARS_CHUNK)
             chunk = await self.bars_range(name, tf, frm, to)
             if chunk:
@@ -510,8 +541,8 @@ class CTraderFeed:
         conn = self._conn()
         info = await self.info(name)
         d = info["digits"]
-        bars: dict[int, dict] = {}
-        window = tf * 1000 * BARS_CHUNK
+        bars: dict[int, dict] = {}   # ora deschiderii -> lumânarea (fără duplicate)
+        window = tf * 1000 * BARS_CHUNK   # lungimea unei bucăți, în milisecunde
         to = end_ms - 1
         while to >= start_ms:
             frm = max(start_ms, to - window + 1)
@@ -535,7 +566,8 @@ class CTraderFeed:
                            "low": round(low / PRICE_SCALE, d),
                            "close": round((low + int(b.get("deltaClose", 0))) / PRICE_SCALE, d),
                            "volume": int(b.get("volume", 0))}
-            to = frm - 1
+            to = frm - 1   # următoarea bucată: imediat înaintea celei de acum
+        # În ordine cronologică, doar cele din interval.
         return [bars[t] for t in sorted(bars) if start_ms <= t * 1000 < end_ms]
 
     # ---------- Conexiunea permanentă ----------
@@ -553,6 +585,7 @@ class CTraderFeed:
             except Exception as e:  # noqa: BLE001 - bucla nu trebuie să se oprească
                 reason = f"{type(e).__name__}: {e}"
             finally:
+                # Orice s-a întâmplat: anunțăm deconectarea și ștergem starea conexiunii vechi.
                 if self.ready.is_set() and self.on_status:
                     self.on_status(False)
                 self.ready.clear()
@@ -567,8 +600,11 @@ class CTraderFeed:
                 delay = 1
             print(f"[cTrader] {reason}; reconectare în {delay}s")
             await asyncio.sleep(delay)
+            # Dublăm pauza (maximum 30 s); la erori de autorizare rămâne 60 s.
             delay = min(delay * 2, 30) if delay < 60 else 60
 
+    # O sesiune completă: conectare, autorizare aplicație + cont, lista de simboluri, abonări.
+    # Se termină abia când conexiunea se închide (atunci run() se reconectează).
     async def _session(self):
         tok = self.tokens
         conn = Connection(tok.is_live, self._on_event)
@@ -598,6 +634,7 @@ class CTraderFeed:
         self._wake.set()
         if self.on_status:
             self.on_status(True)
+        # În fundal: sincronizarea abonărilor și verificarea orară a tokenului.
         tasks = [asyncio.create_task(self._sync_loop(conn)), asyncio.create_task(self._token_watch(conn))]
         try:
             await conn.wait_closed()
@@ -605,12 +642,42 @@ class CTraderFeed:
             for t in tasks:
                 t.cancel()
 
+    # Citește lista de simboluri a contului și construiește tabelele de căutare (nume, id, meniu).
     async def _load_symbols(self, conn: Connection):
         res = await conn.request(SYMBOLS_LIST_REQ, {"ctidTraderAccountId": self.tokens.account_id})
         self.symbols = {s["symbolName"]: s for s in res.get("symbol", []) if s.get("symbolName")}
         self._lookup = {self._norm(n): n for n in self.symbols}
         self._by_id = {int(s["symbolId"]): n for n, s in self.symbols.items()}
         self._details.clear()
+        self._tree = await self._load_tree(conn)
+
+    # Categoriile simbolurilor: clasa de active (Forex, Metals, US Shares...) și, unde există,
+    # categoria din ea (ex. EU Shares / France). „Default Category” nu adaugă nimic, deci o sărim.
+    # Ordinea e cea din cTrader (sortingNumber). Fără categorii (eroare), toate ajung la „Altele”.
+    async def _load_tree(self, conn: Connection) -> list[dict]:
+        acc = {"ctidTraderAccountId": self.tokens.account_id}
+        try:
+            classes = (await conn.request(ASSET_CLASS_LIST_REQ, acc)).get("assetClass", [])
+            cats = (await conn.request(SYMBOL_CATEGORY_REQ, acc)).get("symbolCategory", [])
+        except CTraderError as e:
+            print(f"[cTrader] categoriile simbolurilor nu s-au putut citi: {e}")
+            classes, cats = [], []
+        classes = {int(c["id"]): c for c in classes}
+        cats = {int(c["id"]): c for c in cats}
+
+        # Pentru un simbol: (cheia de sortare, grupul din meniu, ex. ["Forex"] sau ["Shares", "France"]).
+        def place(s: dict) -> tuple:
+            cat = cats.get(int(s.get("symbolCategoryId", -1)))
+            cls = classes.get(int(cat["assetClassId"])) if cat else None
+            group = [cls["name"]] if cls else ["Altele"]
+            if cat and cat.get("name") and cat["name"] != "Default Category":
+                group.append(cat["name"])
+            order = (cls.get("sortingNumber", 1e18) if cls else 1e18,
+                     cat.get("sortingNumber", 1e18) if cat else 1e18, s.get("sortingNumber", 1e18))
+            return order, group
+
+        placed = sorted((place(s) + (s,) for s in self.symbols.values()), key=lambda x: x[0])
+        return [{"s": s["symbolName"], "d": s.get("description", ""), "g": g} for _, g, s in placed]
 
     # Verifică o dată pe oră dacă tokenul expiră curând; dacă da, închide conexiunea, iar la
     # reconectare tokenul se reînnoiește (vezi _session).

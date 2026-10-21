@@ -1,0 +1,169 @@
+<!doctype html>
+<!-- ================================================================================== -->
+<!-- Calculator de volum (loturi) pentru MT5, pagină independentă (se deschide direct în  -->
+<!-- browser, fără server).                                                              -->
+<!-- Întrebarea la care răspunde: „Câte loturi scriu în câmpul Volume, ca dacă prețul     -->
+<!-- atinge Stop Loss-ul să pierd exact X% din cont?”                                     -->
+<!--   volum = bani riscați ÷ pierderea la 1 lot                                          -->
+<!--   bani riscați      = balanța × riscul (%)                                           -->
+<!--   pierderea la 1 lot = distanța până la SL, în tick-uri × tick value (€ la 1 lot)     -->
+<!-- Valorile instrumentelor (tick value, contract, levier) sunt citite din terminalul    -->
+<!-- FBS demo pe 20.10.2026 și scrise în obiectul S din script; pot fi altele azi.         -->
+<!-- ================================================================================== -->
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calculator volum MT5</title>
+<style>
+/* Culorile paginii, ca variabile: tema deschisă (implicit), apoi tema închisă (după setarea
+   sistemului sau forțată cu data-theme="dark"). */
+:root{--bg:#faf9f5;--card:#f0eee6;--text:#1f1e1d;--muted:#6b6a65;--line:#d6d4cc;--accent:#185fa5;--accentbg:#e6f1fb;--green:#1d9e75;--red:#e24b4a;--warn:#854f0b;--warnbg:#faeeda}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1f1e1d;--card:#2b2a27;--text:#ecebe6;--muted:#a3a29c;--line:#44433f;--accent:#85b7eb;--accentbg:#0c447c;--green:#5dcaa5;--red:#f09595;--warn:#fac775;--warnbg:#633806}}
+:root[data-theme="dark"]{--bg:#1f1e1d;--card:#2b2a27;--text:#ecebe6;--muted:#a3a29c;--line:#44433f;--accent:#85b7eb;--accentbg:#0c447c;--green:#5dcaa5;--red:#f09595;--warn:#fac775;--warnbg:#633806}
+/* Așezarea generală: pagina centrată, maximum 760px lățime. */
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5}
+main{max-width:760px;margin:0 auto;padding:24px 16px 40px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 24px}
+/* Un rând de setare: eticheta, sliderul / lista și valoarea aleasă. */
+.row{display:flex;align-items:center;gap:12px;margin:0 0 12px;font-size:14px;color:var(--muted)}
+.row>span:first-child{min-width:120px}
+.row input[type=range]{flex:1;min-width:0}
+.row select{flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:14px}
+.val{min-width:96px;text-align:right;font-weight:500;color:var(--text)}
+svg{width:100%;height:auto;display:block;margin:12px 0}
+/* Ecuația „bani riscați ÷ pierdere la 1 lot = volum”, ca trei carduri cu semnele între ele. */
+.eq{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);gap:8px;align-items:center;margin:16px 0 8px}
+.card{background:var(--card);border-radius:8px;padding:12px;text-align:center}
+.card .l{font-size:12px;color:var(--muted)}
+.card .n{font-size:22px;font-weight:500;margin:4px 0}
+.card .s{font-size:12px;color:var(--muted)}
+.op{font-size:22px;color:var(--muted)}
+.res{background:var(--accentbg)}.res .n,.res .l{color:var(--accent)}
+/* Textele de verificare și avertismentul (portocaliu). */
+.info{font-size:14px;color:var(--muted);margin:8px 0}
+.warn{background:var(--warnbg);color:var(--warn);padding:10px 12px;border-radius:8px;font-size:14px}
+/* Pe telefon: cardurile unul sub altul, etichetele pe rând separat. */
+@media (max-width:560px){.eq{grid-template-columns:1fr}.op{text-align:center}.row{flex-wrap:wrap}.row>span:first-child{min-width:100%}}
+</style>
+</head>
+<body>
+<main>
+<h1>Calculator volum MT5</h1>
+<p class="sub">Cont FBS în EUR · valori citite din terminal pe 20.10.2026 (demo). Verifică tick value în Specification înainte de ordin.</p>
+
+<!-- Setările: instrumentul, balanța, riscul (% din balanță) și distanța până la SL. -->
+<!-- Fiecare valoare aleasă apare în dreapta sliderului (elementele cu id ...v).     -->
+<div class="row"><span>Instrument</span>
+<select id="sym"><option value="xau">XAUUSD · contract 100 oz · levier 1:20</option><option value="eur">EURUSD · contract 100 000 · levier 1:30</option></select></div>
+<div class="row"><span>Balanță cont</span><input type="range" id="bal" min="500" max="50000" step="500" value="10000"><span class="val" id="balv"></span></div>
+<div class="row"><span>Risc pe trade</span><input type="range" id="risk" min="0.25" max="5" step="0.25" value="1"><span class="val" id="riskv"></span></div>
+<div class="row"><span>Distanță SL</span><input type="range" id="sl" min="1" max="30" step="0.5" value="5"><span class="val" id="slv"></span></div>
+
+<!-- Desenul: linia de intrare (verde), linia de SL (roșu, punctat) și zona roșie dintre ele. -->
+<!-- Linia de SL coboară când mărești distanța; în dreapta apare calculul pierderii la 1 lot.  -->
+<svg viewBox="0 0 680 230" role="img" aria-label="Distanța dintre intrare și stop loss">
+<rect x="40" y="20" width="300" height="190" rx="8" fill="var(--card)" stroke="var(--line)"/>
+<line x1="60" y1="50" x2="320" y2="50" stroke="var(--green)" stroke-width="2"/>
+<text x="64" y="40" font-size="12" fill="var(--muted)" id="entT">Intrare</text>
+<rect id="zone" x="60" y="50" width="260" height="70" fill="var(--red)" opacity="0.12"/>
+<line id="slLine" x1="60" y1="120" x2="320" y2="120" stroke="var(--red)" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="64" y="136" font-size="12" fill="var(--muted)" id="slT">Stop loss</text>
+<line id="br" x1="360" y1="50" x2="360" y2="120" stroke="var(--muted)"/>
+<line x1="352" y1="50" x2="368" y2="50" stroke="var(--muted)"/>
+<line id="brB" x1="352" y1="120" x2="368" y2="120" stroke="var(--muted)"/>
+<text x="380" y="70" font-size="14" font-weight="500" fill="var(--text)" id="tk"></text>
+<text x="380" y="90" font-size="12" fill="var(--muted)" id="tkd"></text>
+<text x="380" y="120" font-size="12" fill="var(--muted)" id="tv"></text>
+<text x="380" y="145" font-size="14" font-weight="500" fill="var(--text)" id="pl"></text>
+<text x="380" y="180" font-size="12" fill="var(--muted)">Zona roșie = ce pierzi dacă</text>
+<text x="380" y="197" font-size="12" fill="var(--muted)">prețul atinge SL-ul</text>
+</svg>
+
+<!-- Rezultatul, ca ecuație: bani riscați ÷ pierdere la 1 lot = volumul de scris în MT5. -->
+<div class="eq">
+<div class="card"><div class="l">Bani riscați</div><div class="n" id="rm"></div><div class="s" id="rms"></div></div>
+<div class="op">÷</div>
+<div class="card"><div class="l">Pierdere la 1 lot</div><div class="n" id="lpl"></div><div class="s" id="lpls"></div></div>
+<div class="op">=</div>
+<div class="card res"><div class="l">Scrie în „Volume”</div><div class="n" id="lots"></div><div class="s" id="raw"></div></div>
+</div>
+<!-- Verificarea calculului, marja blocată și avertismentul (ascuns când totul e în regulă). -->
+<p class="info" id="check"></p>
+<p class="info" id="margin"></p>
+<p class="warn" id="warn" hidden></p>
+</main>
+<script>
+// Datele instrumentelor (citite din MT5, Specification):
+//   entry    = prețul de intrare folosit în exemplu (buy)
+//   tick     = tick size, cea mai mică mișcare de preț
+//   tv       = tick value: câți € câștigi / pierzi la 1 lot când prețul se mișcă un tick
+//   contract = mărimea unui lot (100 uncii de aur / 100.000 EUR)
+//   lev      = levierul contului pe instrument
+//   unit/per = cum se măsoară distanța SL în slider: la aur în $ (1$ = 100 tick-uri),
+//              la EURUSD în pips (1 pip = 10 tick-uri)
+//   dec      = zecimalele prețului; min/max/step/def = limitele și valoarea implicită a sliderului SL
+//   usd      = prețul e în dolari (trebuie convertit în EUR pentru marjă)
+const S={
+ xau:{entry:4131.45,tick:0.01,tv:0.89,contract:100,lev:20,unit:'$',per:100,dec:2,min:1,max:30,step:0.5,def:5,usd:true},
+ eur:{entry:1.12320,tick:0.00001,tv:0.89,contract:100000,lev:30,unit:'pips',per:10,dec:5,min:5,max:100,step:1,def:20,usd:false}
+};
+// Cursul EUR/USD folosit la conversia valorii poziției de aur (în $) în euro.
+const EURUSD=1.1232;
+// Scurtătură: $('bal') = elementul cu id="bal".
+const $=id=>document.getElementById(id);
+// Număr formatat românește, cu cel mult 2 zecimale (ex. 10.000 sau 12,5).
+const f=n=>n.toLocaleString('ro-RO',{minimumFractionDigits:0,maximumFractionDigits:2});
+// Alt instrument ales: sliderul de SL primește limitele și valoarea implicită ale instrumentului.
+function setSym(){const s=S[$('sym').value];const sl=$('sl');sl.min=s.min;sl.max=s.max;sl.step=s.step;sl.value=s.def;upd();}
+// Recalculează și redesenează totul; rulează la fiecare mișcare de slider.
+function upd(){
+ // s = instrumentul, bal = balanța (€), r = riscul (%), d = distanța SL (în $ sau pips).
+ const s=S[$('sym').value],bal=+$('bal').value,r=+$('risk').value,d=+$('sl').value;
+ // ticks = distanța SL în tick-uri; risk = banii riscați (€); lpl = pierderea la 1 lot (€);
+ // raw = volumul exact (de obicei cu multe zecimale).
+ const ticks=Math.round(d*s.per),risk=bal*r/100,lpl=ticks*s.tv,raw=risk/lpl;
+ // Volumul rotunjit ÎN JOS la 0.01 (pasul MT5), ca să nu riscăm mai mult decât am ales; minimum 0.01.
+ // (+1e-9 evită erori de rotunjire, ex. 0.29999999 care ar deveni 0.29 în loc de 0.30.)
+ const lots=Math.max(0.01,Math.floor(raw*100+1e-9)/100);
+ // Prețul SL-ului pentru un buy: sub prețul de intrare cu distanța aleasă.
+ const slPrice=s.entry-ticks*s.tick;
+ // Valorile alese, scrise lângă slidere.
+ $('balv').textContent=f(bal)+' €';$('riskv').textContent=r.toFixed(2)+' %';
+ $('slv').textContent=s.unit==='$'?d+' $':d+' pips';
+ // Desenul: poziția verticală a liniei de SL (65 = cel mai aproape, 190 = cel mai departe),
+ // apoi mutăm linia, acolada din dreapta, zona roșie și eticheta SL.
+ const y=65+(d-s.min)/(s.max-s.min)*125;
+ for(const id of ['slLine','brB']){$(id).setAttribute('y1',y);$(id).setAttribute('y2',y);}
+ $('br').setAttribute('y2',y);$('zone').setAttribute('height',y-50);$('slT').setAttribute('y',Math.min(y+16,205));
+ // Textele din desen: prețurile și calculul pierderii la 1 lot, pas cu pas.
+ $('entT').textContent='Intrare (buy) '+s.entry.toFixed(s.dec);
+ $('slT').textContent='Stop loss '+slPrice.toFixed(s.dec);
+ $('tk').textContent=f(ticks)+' tick-uri';
+ $('tkd').textContent='distanță '+(ticks*s.tick).toFixed(s.dec)+' ÷ tick size '+s.tick;
+ $('tv').textContent='× '+s.tv+' € tick value (la 1 lot)';
+ $('pl').textContent='= '+f(lpl)+' € pierdere la 1 lot';
+ // Cele trei carduri ale ecuației și rândul de verificare.
+ $('rm').textContent=f(risk)+' €';$('rms').textContent=f(bal)+' € × '+r+'%';
+ $('lpl').textContent=f(lpl)+' €';$('lpls').textContent=f(ticks)+' tick × '+s.tv+' €';
+ $('lots').textContent=lots.toFixed(2);$('raw').textContent='brut '+raw.toFixed(4)+' → rotunjit în jos';
+ $('check').textContent='Verificare: '+lots.toFixed(2)+' loturi × '+f(lpl)+' € = '+f(lots*lpl)+' € pierdere la SL.';
+ // Marja: valoarea poziției în € (la aur: uncii × preț în $, convertit în €; la EURUSD: suma
+ // în EUR) împărțită la levier = banii blocați de broker cât e deschisă poziția.
+ const notionalEur=s.usd?lots*s.contract*s.entry/EURUSD:lots*s.contract;
+ const marg=notionalEur/s.lev;
+ $('margin').textContent='Marjă blocată ≈ '+f(marg)+' € (valoare poziție '+f(notionalEur)+' € ÷ levier 1:'+s.lev+').';
+ // Avertismente: volumul exact e sub minimul MT5 (0.01 ar risca mai mult decât ai ales),
+ // sau marja depășește balanța (brokerul ar respinge ordinul).
+ const w=$('warn');
+ if(raw<0.01){w.hidden=false;w.textContent='Lotul calculat e sub minimul de 0.01. La 0.01 ai risca '+f(0.01*lpl)+' €, mai mult decât ți-ai propus. Mărește riscul, strânge SL-ul sau nu intra.';}
+ else if(marg>bal){w.hidden=false;w.textContent='Marja necesară depășește balanța. Ordinul ar fi respins.';}
+ else w.hidden=true;
+}
+// Legăm controalele: alt instrument -> setSym; orice slider -> upd. Apoi primul calcul.
+$('sym').onchange=setSym;for(const id of ['bal','risk','sl'])$(id).oninput=upd;upd();
+</script>
+</body>
+</html>

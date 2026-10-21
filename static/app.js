@@ -7,10 +7,13 @@
 //  - Afișează cotația curentă: bid, ask, spread, ora ultimului tic, ticuri pe secundă.
 //  - Ține deschisă conexiunea WebSocket cu serverul (server.py): primește istoricul la
 //    conectare („hello”), apoi fiecare tic nou („ticks”) și evenimentele de alarmă („alert”).
-//  - Gestionează butoanele de timeframe și câmpul de simbol.
+//    De la M1 în sus, înainte de hello vine progresul datastore-ului local („store”, afișat de
+//    datastore.js), iar indicatorii primesc rezultatele calculate pe server („indicator”).
+//  - Gestionează listele de timeframe și de tip de afișare (lumânări, Heikin-Ashi, linie...).
 //
 //  Fișierele alerts.js și push.js se încarcă DUPĂ acesta și folosesc direct variabilele
-//  definite aici (state, chart, series, $, css, store, symInput).
+//  definite aici (state, chart, series, $, css, store, selectSymbol). Meniul de simboluri
+//  e în symbols.js (loadSymbols, apelată aici la schimbarea sursei de prețuri).
 // =====================================================================================
 
 // Timeframe-urile disponibile: [durata unei lumânări în secunde, eticheta butonului].
@@ -18,6 +21,11 @@ const TFS = [
   [1, "1s"], [5, "5s"], [15, "15s"], [30, "30s"],
   [60, "M1"], [300, "M5"], [900, "M15"], [1800, "M30"], [3600, "H1"], [14400, "H4"], [86400, "D1"],
   [604800, "W1"],
+];
+// Tipurile de afișare a chartului: [id, eticheta din listă].
+const CHART_TYPES = [
+  ["candles", "Lumânări japoneze"], ["heikin", "Heikin-Ashi"], ["bars", "Bare OHLC"],
+  ["line", "Linie"], ["area", "Arie"],
 ];
 // Câte ticuri păstrăm pentru chartul de ticuri (cele mai vechi se elimină).
 const MAX_TICKS = 600;
@@ -45,11 +53,14 @@ const store = {
 //  - lastBar: lumânarea curentă (cea care se actualizează la fiecare tic).
 //  - prevBid: bid-ul anterior, ca să colorăm prețul verde (a urcat) sau roșu (a scăzut).
 let state = {
+  source: null,       // sursa prețurilor ("mt5" / "ctrader"), din ultimul hello
   symbol: (new URLSearchParams(location.search).get("symbol") || store.get("symbol", "EURUSD")).toUpperCase(),
   tf: Number(store.get("tf", 1)),
+  chartType: store.get("chartType", "candles"),   // unul dintre CHART_TYPES
   digits: 5,
   point: 0.00001,
   lastBar: null,
+  loaded: false,      // a sosit istoricul (hello) pe conexiunea curentă
   ticks: [],          // [time_msc, bid, ask]
   prevBid: null,
   arrivals: [],       // momente locale de recepție, pentru ticuri/s
@@ -110,9 +121,123 @@ const askLine = series.createPriceLine({
 
 // Spune chartului câte zecimale să afișeze pe axa de preț (5 la EURUSD, 2 la aur etc.).
 function applyDigits() {
-  series.applyOptions({
-    priceFormat: { type: "price", precision: state.digits, minMove: state.point },
+  const opts = { priceFormat: { type: "price", precision: state.digits, minMove: state.point } };
+  series.applyOptions(opts);
+  overlay?.applyOptions(opts);
+}
+
+// ---------- Tipul de afișare ----------
+// rawBars = lumânările reale (bid). `series` le conține mereu pe aceleași momente de timp, așa că
+// alarmele, liniile de trend și indicatorii (care lucrează cu `series`) merg la fel la orice tip:
+//  - Lumânări japoneze: `series` desenează lumânările reale.
+//  - Heikin-Ashi: `series` desenează lumânările calculate pe server de heikin_ashi() din
+//    heikin_aishi.py (haBars). Cât timp nu le avem (sau funcția dă eroare), apar cele reale.
+//  - Bare / Linie / Arie: `series` rămâne cu lumânările reale, dar transparentă, iar o a doua
+//    serie (overlay) le desenează în forma aleasă.
+let rawBars = [];
+let haBars = null;
+let overlay = null;
+// haGen crește la fiecare istoric / tip nou: un răspuns Heikin-Ashi pentru date vechi e ignorat.
+// haBusy / haAgain: o singură cerere odată (încă una la final, dacă între timp au venit ticuri).
+// haFailed: funcția a dat eroare; nu mai cerem până la următorul istoric sau tip ales.
+let haGen = 0, haBusy = false, haAgain = false, haFailed = false, haTimer = null;
+
+// O lumânare în forma cerută de seria overlay: întreagă pentru bare OHLC, doar închiderea
+// (time + value) pentru linie și arie.
+const overlayPoint = (b) => (state.chartType === "bars" ? { ...b } : { time: b.time, value: b.close });
+
+// Redesenează toate lumânările după tipul de afișare curent.
+function showBars() {
+  series.setData(state.chartType === "heikin" && haBars ? haBars : rawBars);
+  overlay?.setData(rawBars.map(overlayPoint));
+}
+
+// Cere serverului lumânările Heikin-Ashi pentru lumânările date.
+async function fetchHeikin(bars) {
+  const r = await fetch("/api/heikin_ashi", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bars }),
   });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data.bars;
+}
+
+// Câte lumânări trimitem după primul calcul. Open-ul Heikin-Ashi e media dintre open-ul și
+// close-ul lumânării anterioare, deci influența lumânărilor mai vechi se înjumătățește la fiecare
+// lumânare: după 64 de lumânări e sub precizia numerelor (2^-64), iar rezultatul e același ca pe tot
+// istoricul. Așa, la fiecare secundă trimitem serverului 64 de lumânări, nu toate.
+const HA_TAIL = 64;
+
+// Calculează (pe server) Heikin-Ashi și desenează rezultatul. Prima dată pe tot istoricul de pe
+// chart; apoi doar pe ultimele HA_TAIL lumânări, din care înlocuim lumânările noi / în curs.
+async function refreshHeikin() {
+  if (state.chartType !== "heikin" || !rawBars.length || haFailed) return;
+  if (haBusy) { haAgain = true; return; }
+  haBusy = true;
+  const gen = haGen;   // dacă haGen se schimbă cât așteptăm, răspunsul e pentru date vechi
+  const prevLen = haBars?.length ?? 0;
+  // Dacă rămânem în urmă cu mai mult de HA_TAIL lumânări (sau la început), recalculăm tot.
+  const from = prevLen && rawBars.length - HA_TAIL <= prevLen - 1 ? Math.max(0, rawBars.length - HA_TAIL) : 0;
+  try {
+    const part = await fetchHeikin(rawBars.slice(from));
+    if (gen !== haGen || !part.length) return;
+    // Calcul complet (sau istoric schimbat): înlocuim toate lumânările Heikin-Ashi.
+    if (from === 0 && !(prevLen && haBars[0].time === part[0].time && part.length >= prevLen)) {
+      haBars = part;
+      series.setData(haBars);
+    } else {
+      // part[j] corespunde lumânării rawBars[from + j]; redesenăm de la ultima lumânare afișată.
+      const start = Math.max(prevLen - 1, from);
+      haBars = haBars.slice(0, start).concat(part.slice(start - from));
+      for (let i = start; i < haBars.length; i++) series.update(haBars[i]);
+      if (haBars.length > prevLen) window.onNewBar?.();
+    }
+  } catch (e) {
+    if (gen !== haGen) return;
+    haFailed = true;
+    toast("Heikin-Ashi indisponibil", `${e.message}. Afișez lumânările japoneze.`);
+  } finally {
+    haBusy = false;
+    if (haAgain) { haAgain = false; scheduleHeikin(); }
+  }
+}
+// La ticuri cerem Heikin-Ashi cel mult o dată pe secundă.
+function scheduleHeikin() {
+  if (!haTimer) haTimer = setTimeout(() => { haTimer = null; refreshHeikin(); }, 1000);
+}
+
+// Aplică tipul de afișare ales: culorile lui `series`, seria overlay și datele.
+function applyChartType() {
+  if (overlay) { chart.removeSeries(overlay); overlay = null; }
+  const t = state.chartType;
+  // La bare / linie / arie, lumânările din `series` devin transparente (le desenează overlay-ul).
+  const hidden = t === "bars" || t === "line" || t === "area";
+  const up = hidden ? "rgba(0,0,0,0)" : css("--up"), down = hidden ? "rgba(0,0,0,0)" : css("--down");
+  series.applyOptions({ upColor: up, downColor: down, wickUpColor: up, wickDownColor: down, lastValueVisible: !hidden });
+  if (t === "bars") {
+    overlay = chart.addBarSeries({ upColor: css("--up"), downColor: css("--down"), thinBars: false });
+  } else if (t === "line") {
+    overlay = chart.addLineSeries({ color: css("--accent"), lineWidth: 2 });
+  } else if (t === "area") {
+    overlay = chart.addAreaSeries({
+      lineColor: css("--accent"), lineWidth: 2,
+      topColor: "rgba(76, 141, 255, .35)", bottomColor: "rgba(76, 141, 255, 0)",
+    });
+  }
+  applyDigits();
+  haBars = null; haGen++; haFailed = false;
+  showBars();
+  refreshHeikin();
+}
+
+// Ultima lumânare s-a schimbat (tic nou): o salvăm în rawBars și o redesenăm.
+function drawLastBar(isNew) {
+  const b = { ...state.lastBar };
+  if (isNew) rawBars.push(b); else rawBars[rawBars.length - 1] = b;
+  if (state.chartType === "heikin" && haBars) scheduleHeikin();
+  else series.update({ ...b });
+  overlay?.update(overlayPoint(b));
 }
 
 // Actualizează lumânarea curentă cu un tic nou (doar bid-ul contează pentru lumânări).
@@ -127,6 +252,10 @@ function onTick(msc, bid, ask) {
   if (!b || t > b.time) {
     // Ticul deschide o lumânare nouă: toate cele 4 prețuri pornesc de la el.
     state.lastBar = { time: t, open: bid, high: bid, low: bid, close: bid };
+    drawLastBar(true);
+    // Indicatorii își prelungesc liniile până la noua lumânare (vezi indicators.js).
+    if (b) window.onNewBar?.();
+    return;
   } else if (t === b.time) {
     // Ticul aparține lumânării curente: actualizăm maximul, minimul și închiderea.
     b.high = Math.max(b.high, bid);
@@ -135,8 +264,8 @@ function onTick(msc, bid, ask) {
   } else {
     return; // tic mai vechi decât ultima lumânare
   }
-  // series.update redesenează doar ultima lumânare (rapid). `{ ...obj }` = o copie a obiectului.
-  series.update({ ...state.lastBar });
+  // Redesenăm doar ultima lumânare (rapid).
+  drawLastBar(false);
 }
 
 // ---------- Panou de cotații ----------
@@ -259,7 +388,15 @@ new ResizeObserver(requestDraw).observe(canvas);
 
 // ---------- WebSocket ----------
 // ws = conexiunea curentă; retry = numărul de reconectări eșuate la rând (pentru pauza dintre ele).
-let ws = null, retry = 0, retryTimer = null;
+let ws = null, retry = 0, retryTimer = null, helloTimer = null;
+
+// Trimite un mesaj serverului pe conexiunea curentă (ex. cererea unui indicator). Întoarce false
+// dacă nu există încă o conexiune deschisă (indicatorii își retrimit cererea la următorul hello).
+function sendWS(obj) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(obj));
+  return true;
+}
 
 // Afișează starea conexiunii („live” verde / „deconectat” roșu) în colțul de sus.
 function setStatus(on, text) {
@@ -279,15 +416,35 @@ function connect() {
   const url = `${proto}://${location.host}/ws?symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}`;
   const sock = new WebSocket(url);
   ws = sock;
+  state.loaded = false;
   setStatus(false, "conectare...");
+  // Indicatorul datastore-ului de pe chart: „se verifică” până la primul mesaj (datastore.js).
+  window.onStoreStatus?.(state.tf >= 60 ? { state: "pending" } : { state: "off" });
+  // Plasă de siguranță: dacă istoricul nu vine în 40 s (serverul are propria limită de 30 s),
+  // închidem conexiunea; onclose de mai jos reîncearcă, deci pagina nu rămâne în „conectare...”.
+  // Fiecare mesaj de progres al datastore-ului repornește termenul (o descărcare mare durează).
+  const armHelloTimer = () => {
+    clearTimeout(helloTimer);
+    helloTimer = setTimeout(() => {
+      if (ws === sock && !sock.gotHello) { sock.errorMsg = "fără răspuns de la server"; sock.close(); }
+    }, 40000);
+  };
+  armHelloTimer();
 
   // Fiecare mesaj de la server e un text JSON cu un câmp `type` care spune ce conține.
   sock.onmessage = (ev) => {
+    if (ws !== sock) return;   // mesaj întârziat de pe o conexiune veche
     const msg = JSON.parse(ev.data);
     if (msg.type === "hello") {
       // Primul mesaj după conectare: informațiile simbolului + istoricul.
       retry = 0;
+      sock.gotHello = true;
+      clearTimeout(helloTimer);
+      // Altă sursă decât la conexiunea anterioară: alt broker, deci alte simboluri sugerate.
+      if (msg.source !== state.source) { state.source = msg.source; loadSymbols(); loadSources(); }
       state.symbol = msg.symbol;
+      $("symName").textContent = msg.symbol;
+      $("symBtn").title = msg.description || msg.symbol;
       state.digits = msg.digits;
       state.point = msg.point;
       state.ticks = [];
@@ -297,9 +454,14 @@ function connect() {
       // Istoric nou: istoricul mai vechi se încarcă din nou, de la zero, la derulare.
       // (Înainte de setData, care poate cere imediat lumânări mai vechi.)
       older = { loading: false, done: false, retryAt: 0 };
-      series.setData(msg.bars);
+      rawBars = msg.bars.map((b) => ({ ...b }));
+      haBars = null; haGen++; haFailed = false;
+      showBars();
+      refreshHeikin();
       state.lastBar = msg.bars.length ? { ...msg.bars[msg.bars.length - 1] } : null;
-      chart.timeScale().scrollToRealTime();
+      // Sărim direct la prezent (rightOffset lumânări libere în dreapta). Fără animație: scrollToRealTime
+      // animează ~1 s, iar liniile indicatorilor sosite între timp ar opri derularea la jumătate.
+      chart.timeScale().scrollToPosition(chart.timeScale().options().rightOffset, false);
       document.title = `${msg.symbol} · Nexus Live Chart`;
       // Chartul de ticuri pornește cu ultimele ticuri din istoric (sau doar cu ultimul tic).
       state.ticks = msg.recent.length ? msg.recent : (msg.last ? [msg.last] : []);
@@ -307,10 +469,20 @@ function connect() {
       if (msg.last) updateQuote(...msg.last);
       setStatus(true, "live");
       requestDraw();
+      state.loaded = true;
+      // Starea datastore-ului pentru perechea deschisă (datastore.js).
+      window.onStoreStatus?.(msg.store);
       // Anunțăm alerts.js că s-a încărcat un simbol (dacă a definit funcția; `?.` = doar dacă există).
       window.onSymbolLoaded?.();
-      // Liniile de trend desenate pentru istoricul vechi nu mai sunt valabile (vezi trend.js).
-      window.onHistoryLoaded?.();
+      // Indicatorii atașați își cer din nou rezultatele, pentru noul istoric (indicators.js).
+      window.onHistoryLoaded?.(msg);
+    } else if (msg.type === "store") {
+      // Progresul / starea datastore-ului local (descărcare, actualizare la lumânare închisă).
+      if (!sock.gotHello) armHelloTimer();
+      window.onStoreStatus?.(msg);
+    } else if (msg.type === "indicator") {
+      // Rezultatul unui indicator, calculat pe server din datastore (indicators.js).
+      window.onIndicator?.(msg);
     } else if (msg.type === "alert") {
       // O alarmă s-a declanșat sau s-a actualizat: o tratează alerts.js.
       window.onAlertEvent?.(msg.alert);
@@ -332,12 +504,26 @@ function connect() {
       // și istoricul din perioada în care conexiunea a lipsit.
       if (msg.up) connect();
       else setStatus(false, "sursa de prețuri deconectată — reîncerc");
+    } else if (msg.type === "source") {
+      // Sursa prețurilor s-a schimbat (din această pagină sau din alta): cerem istoricul de la ea.
+      // Meniul de simboluri trece imediat pe simbolurile noii surse (chiar dacă simbolul curent
+      // nu există acolo și chartul nu se poate încărca).
+      sourceSel.value = state.source = msg.source;
+      loadSymbols();
+      connect();
+      setStatus(false, `conectare la ${msg.name}...`);
     } else if (msg.type === "error") {
       // Afișăm mesajul. Pentru erori definitive (ex. simbol inexistent) NU mai încercăm
       // reconectarea; pentru cele temporare (msg.retry, ex. sursa de prețuri indisponibilă), da.
       setStatus(false, msg.msg);
       sock.errorMsg = msg.msg;
-      if (!msg.retry) sock.onclose = null;
+      if (!msg.retry) { sock.onclose = null; clearTimeout(helloTimer); }
+      // Simbolul nu există la sursa activă (de obicei după schimbarea sursei): anunțăm
+      // și deschidem meniul de simboluri, ca să se poată alege direct altul.
+      if (msg.code === "unknown_symbol") {
+        toast("Simbol indisponibil", `${msg.symbol} nu există la ${msg.source}. Alege alt simbol din meniu.`);
+        window.openSymbols?.();
+      }
     }
   };
   // Conexiunea a căzut (server oprit, internet întrerupt): reîncercăm cu pauze tot mai mari –
@@ -355,71 +541,132 @@ function connect() {
 // vechi e ignorat. done = sursa nu mai are istoric; retryAt = pauză după o eroare.
 let older = { loading: false, done: false, retryAt: 0 };
 
+// Cere serverului lumânările dinaintea primei lumânări de pe chart și le lipește în față.
 async function loadOlder() {
   const o = older;
-  const data = series.data();
-  if (o.loading || o.done || !data.length || Date.now() < o.retryAt) return;
+  // O cerere deja în curs, istoric terminat, chart gol sau pauză după eroare: nu facem nimic.
+  if (o.loading || o.done || !rawBars.length || Date.now() < o.retryAt) return;
   o.loading = true;
   try {
-    const q = `symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}&before=${data[0].time}`;
+    const q = `symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}&before=${rawBars[0].time}`;
     const r = await fetch(`/api/bars?${q}`);
     if (!r.ok) throw new Error(r.statusText);
     const { bars } = await r.json();
-    if (o !== older) return;
-    const cur = series.data();
-    const add = bars.filter((b) => b.time < cur[0].time);
+    if (o !== older) return;   // între timp s-a încărcat alt simbol / timeframe
+    // Doar lumânările strict mai vechi decât prima de pe chart (fără dubluri).
+    const add = bars.filter((b) => b.time < rawBars[0].time);
     if (!add.length) { o.done = true; return; }
+    // La Heikin-Ashi istoricul începe acum mai devreme: calculăm lumânările noi plus primele
+    // HA_TAIL de după ele (acestea se schimbă puțin, pentru că pornesc acum din alt punct; mai
+    // departe rezultatul rămâne același, vezi HA_TAIL), înainte de a redesena.
+    // (haGen++ anulează și un calcul în curs pentru istoricul de dinainte; reluăm mai jos.)
+    let ha = null;
+    if (state.chartType === "heikin") {
+      const gen = ++haGen;
+      if (haBars) {
+        const part = await fetchHeikin([...add, ...rawBars.slice(0, HA_TAIL)]).catch(() => null);
+        if (o !== older || gen !== haGen) return;
+        if (part && haBars) ha = part.concat(haBars.slice(part.length - add.length));
+      }
+    }
     // Adăugăm lumânările în față și păstrăm pe ecran exact aceeași porțiune de chart.
+    rawBars = [...add, ...rawBars];
+    haBars = ha;
     const range = chart.timeScale().getVisibleLogicalRange();
-    series.setData([...add, ...cur]);
+    showBars();
+    if (state.chartType === "heikin") scheduleHeikin();
     if (range) {
       chart.timeScale().setVisibleLogicalRange({ from: range.from + add.length, to: range.to + add.length });
     }
   } catch {
-    o.retryAt = Date.now() + 5000;
+    o.retryAt = Date.now() + 5000;   // eroare: reîncercăm peste 5 secunde
   } finally {
     o.loading = false;
   }
 }
+// La fiecare derulare / zoom: dacă se vede una dintre primele 200 de lumânări, cerem mai vechi.
 chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
   if (range && range.from < 200) loadOlder();
 });
 
 // ---------- Controale ----------
-// Creăm câte un buton pentru fiecare timeframe din TFS. La click: îl reținem, îl marcăm
-// ca selectat și ne reconectăm (serverul trimite istoricul pentru noul timeframe).
-const tfBox = $("tfs");
-for (const [tf, label] of TFS) {
-  const b = document.createElement("button");
-  b.textContent = label;
-  b.dataset.tf = tf;
-  b.onclick = () => { state.tf = tf; store.set("tf", tf); markTf(); connect(); };
-  tfBox.appendChild(b);
-}
-// Evidențiază (clasa CSS "on") butonul timeframe-ului curent.
-function markTf() {
-  for (const b of tfBox.children) b.classList.toggle("on", Number(b.dataset.tf) === state.tf);
-}
-
-// Câmpul de simbol: la schimbare (Enter sau click în afara lui) trecem pe noul simbol.
-const symInput = $("symbol");
-symInput.value = state.symbol;
-symInput.addEventListener("change", () => {
-  const s = symInput.value.trim().toUpperCase();
-  if (s && s !== state.symbol) { state.symbol = s; store.set("symbol", s); connect(); }
+// Lista de timeframe-uri: câte o opțiune pentru fiecare din TFS. La alegere îl reținem și ne
+// reconectăm (serverul trimite istoricul pentru noul timeframe).
+const tfSel = $("tf");
+for (const [tf, label] of TFS) tfSel.add(new Option(label, tf));
+if (!TFS.some(([tf]) => tf === state.tf)) state.tf = TFS[0][0];
+tfSel.value = state.tf;
+tfSel.addEventListener("change", () => {
+  state.tf = Number(tfSel.value); store.set("tf", state.tf); connect();
 });
-// Enter scoate cursorul din câmp, ceea ce declanșează evenimentul "change" de mai sus.
-symInput.addEventListener("keydown", (e) => { if (e.key === "Enter") symInput.blur(); });
 
-// Cerem lista de simboluri și o punem ca sugestii (<datalist>) pentru câmpul de simbol:
-// întâi cele din Market Watch, apoi restul.
-fetch("/api/symbols").then((r) => r.json()).then(({ visible, all }) => {
-  const dl = $("symbols");
-  for (const s of [...visible, ...all.filter((x) => !visible.includes(x))]) {
-    const o = document.createElement("option"); o.value = s; dl.appendChild(o);
+// Lista tipurilor de afișare (lumânări japoneze, Heikin-Ashi, bare, linie, arie).
+const typeSel = $("chartType");
+for (const [id, label] of CHART_TYPES) typeSel.add(new Option(label, id));
+if (!CHART_TYPES.some(([id]) => id === state.chartType)) state.chartType = "candles";
+typeSel.value = state.chartType;
+typeSel.addEventListener("change", () => {
+  state.chartType = typeSel.value; store.set("chartType", state.chartType); applyChartType();
+});
+
+// Trece chartul pe alt simbol (din meniul de simboluri, symbols.js, sau dintr-o alarmă).
+function selectSymbol(s) {
+  s = s.trim().toUpperCase();
+  if (s && s !== state.symbol) { state.symbol = s; store.set("symbol", s); $("symName").textContent = s; connect(); }
+}
+$("symName").textContent = state.symbol;
+
+// Lista sursei de prețuri (MT5 / cTrader). Sursa e aceeași pentru tot serverul: schimbarea ei
+// de aici se vede în toate paginile deschise. O sursă neconfigurată apare dezactivată, iar
+// motivul se vede la trecerea mouse-ului peste listă.
+const sourceSel = $("source");
+// Reface lista de surse cu datele de la server (/api/sources).
+async function loadSources() {
+  try {
+    const { active, sources } = await (await fetch("/api/sources")).json();
+    sourceSel.replaceChildren();   // golim lista și o completăm din nou
+    for (const s of sources) {
+      const o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = s.problem ? `${s.name} (neconfigurat)` : s.name;
+      o.disabled = Boolean(s.problem) && s.id !== active;
+      sourceSel.appendChild(o);
+    }
+    sourceSel.value = active;
+    sourceSel.title = ["Sursa prețurilor", ...sources.filter((s) => s.problem)
+      .map((s) => `${s.name}: ${s.problem}`)].join("\n");
+  } catch { /* serverul nu răspunde încă; lista se completează la următorul hello */ }
+}
+// Alegerea unei alte surse: o cerem serverului (POST /api/source); lista e blocată până răspunde.
+sourceSel.addEventListener("change", async () => {
+  const want = sourceSel.value;
+  const name = sourceSel.selectedOptions[0].textContent;
+  sourceSel.disabled = true;
+  setStatus(false, `conectare la ${name}...`);
+  try {
+    const r = await fetch("/api/source", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: want }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    // De obicei pagina află de schimbare prin mesajul "source" de pe WebSocket. Dacă însă nu are
+    // nicio conexiune deschisă (ex. după „simbolul nu există la sursa X”), mesajul nu ajunge la
+    // ea, așa că trecem singuri pe noua sursă și ne reconectăm.
+    if (data.active !== state.source) { state.source = data.active; loadSymbols(); }
+    if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) connect();
+    if (!data.connected) setStatus(false, `${name} încă neconectat — reîncerc`);
+  } catch (e) {
+    setStatus(false, `nu pot trece pe ${name}: ${e.message}`);
+    sourceSel.value = state.source;
+    // Chartul a rămas pe sursa veche și merge mai departe: după câteva secunde revenim la „live”.
+    setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) setStatus(true, "live"); }, 6000);
+  } finally {
+    sourceSel.disabled = false;
   }
-}).catch(() => {});
+});
 
-// Pornirea: marcăm timeframe-ul salvat și ne conectăm la server.
-markTf();
+// Pornirea: aplicăm tipul de afișare salvat și ne conectăm la server.
+applyChartType();
+loadSources();
 connect();

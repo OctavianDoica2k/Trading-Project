@@ -2,38 +2,38 @@
 // =====================================================================================
 //  CE FACE ACEST FIȘIER (pe scurt)
 // -------------------------------------------------------------------------------------
-//  - Se înregistrează în meniul de indicatori (indicators.js). Când e atașat, trimite
-//    serverului ultimele TREND_BARS lumânări de pe chart (POST /api/trendlines), indiferent de
-//    zoom; dacă chartul are mai puține, cere întâi istoricul mai vechi. Serverul rulează pe ele
-//    partea a 2-a din analysis.py și întoarce dreptele valide: prin maxime (rezistențe, roșu)
-//    și prin minime (suporturi, verde).
-//  - Fiecare dreaptă e desenată ca o serie de linie, de la primul pivot, prin al doilea,
-//    până la ultima lumânare analizată.
+//  - Se înregistrează în meniul de indicatori (indicators.js). Când e atașat, cere serverului
+//    (pe WebSocket) indicatorul „trend” cu parametrul bars = TREND_BARS. Serverul rulează partea
+//    a 2-a din analysis.py pe ultimele TREND_BARS lumânări ÎNCHISE din datastore-ul local și
+//    întoarce dreptele valide: prin maxime (rezistențe, roșu) și prin minime (suporturi, verde).
+//    La fiecare lumânare închisă, serverul recalculează și trimite singur rezultatul nou.
+//  - Fiecare dreaptă e desenată ca o serie de linie, de la primul pivot, prin al doilea, până
+//    la ultima lumânare închisă, apoi prelungită (cu aceeași pantă) până la lumânarea în curs.
 //  - În dreapta sus pe chart apare controlul indicatorului: sliderul de apropiere, câte linii
-//    se văd, ↻ (recalculează cu lumânările de acum) și ✕ (detașează).
+//    se văd, ↻ (cere din nou rezultatul) și ✕ (detașează).
 //  - Sliderul arată doar liniile apropiate de prețul curent: la N%, o linie e vizibilă dacă
 //    distanța dintre capătul ei și prețul curent e cel mult N% din intervalul de preț al
 //    lumânărilor analizate (maximul − minimul). 100% = toate. La prima atașare pornește de la 50%.
-//  - La schimbarea simbolului / timeframe-ului liniile se recalculează singure.
+//  - Pe 1s–30s nu rulează (lumânările nu se salvează în datastore).
 //
-//  Folosește variabilele din app.js (chart, series, state, $, css, store), toast() din
+//  Folosește variabilele din app.js (chart, series, state, $, css, store, sendWS), toast() din
 //  alerts.js și registerIndicator() din indicators.js.
 // =====================================================================================
 
 // Valoarea sliderului e salvată în browser; dacă lipsește, e prima atașare: 50%.
 const TREND_PCT_KEY = "trend.pct";
 const TREND_DEFAULT_PCT = 50;
-// Câte lumânări în spate analizează indicatorul (aceeași limită e și pe server: TREND_MAX_BARS).
+// Câte lumânări închise în spate analizează indicatorul (parametrul trimis serverului).
 const TREND_BARS = 1000;
 
-// Liniile desenate acum pe chart: { series, end, visible } (end = prețul liniei la ultima
-// lumânare). `trendSpan` = maximul − minimul lumânărilor analizate. `trendJob` crește la
-// fiecare reset, ca un răspuns sosit după schimbarea simbolului / detașare să fie ignorat.
+// Liniile desenate acum pe chart: { series, to, slope, last, end, visible } (to = punctul de la
+// ultima lumânare închisă, slope = variația pe o lumânare, last = ora ultimului punct desenat,
+// end = prețul liniei la lumânarea în curs). `trendSpan` = maximul − minimul lumânărilor analizate.
 let trendLines = [];
 let trendSpan = 0;
-let trendJob = 0;
 let trendWidget = null;   // controlul din dreapta sus (există doar cât e atașat indicatorul)
 
+// Construiește controlul din dreapta sus (slider, căsuța cu procentul, numărul de linii, ↻, ✕).
 function buildTrendWidget() {
   const w = document.createElement("div");
   w.className = "indwidget";
@@ -44,7 +44,7 @@ function buildTrendWidget() {
     <label class="indpct" title="Scrie procentul (0–100)"><input type="number" min="0" max="100" step="1"
       inputmode="numeric" aria-label="Procentul de apropiere">%</label>
     <span class="badge indcount" title="Linii vizibile / linii valide">0</span>
-    <button type="button" class="iconbtn indrefresh" title="Recalculează pe ultimele ${TREND_BARS} de lumânări">↻</button>
+    <button type="button" class="iconbtn indrefresh" title="Cere din nou liniile (ultimele ${TREND_BARS} de lumânări închise din datastore)">↻</button>
     <button type="button" class="iconbtn indremove" title="Detașează indicatorul">✕</button>`;
   const range = w.querySelector("input[type=range]");
   const box = w.querySelector("input[type=number]");
@@ -68,12 +68,13 @@ function buildTrendWidget() {
     setPct(box.value === "" || Number.isNaN(v) ? range.value : Math.min(100, Math.max(0, v)));
   });
   box.addEventListener("keydown", (e) => { if (e.key === "Enter") box.blur(); });
-  w.querySelector(".indrefresh").onclick = () => loadTrendLines();
+  w.querySelector(".indrefresh").onclick = () => requestTrend();
   w.querySelector(".indremove").onclick = () => detachIndicator("trend");
   $("indWidgets").appendChild(w);
   return w;
 }
 
+// Șterge de pe chart toate liniile de trend.
 function clearTrendLines() {
   for (const l of trendLines) chart.removeSeries(l.series);
   trendLines = [];
@@ -83,19 +84,22 @@ function clearTrendLines() {
 // Ascunde / arată liniile după distanța față de prețul curent (bid, ca lumânările).
 function applyTrendFilter() {
   if (!trendWidget) return;
+  if (trendWidget.classList.contains("off")) return;
   const pct = Number(trendWidget.querySelector("input[type=range]").value);
-  const price = state.prevBid ?? state.lastBar?.close;
-  const limit = (pct / 100) * trendSpan;
+  const price = state.prevBid ?? state.lastBar?.close;   // prețul curent
+  const limit = (pct / 100) * trendSpan;                 // distanța maximă permisă, în preț
   let shown = 0;
   for (const l of trendLines) {
     const visible = pct >= 100 || price == null || Math.abs(l.end - price) <= limit;
     if (visible !== l.visible) { l.series.applyOptions({ visible }); l.visible = visible; }
     if (visible) shown++;
   }
+  // „5” dacă se văd toate, altfel „3/5” (vizibile / valide).
   trendWidget.querySelector(".indcount").textContent =
     shown === trendLines.length ? shown : `${shown}/${trendLines.length}`;
 }
 
+// Desenează o dreaptă primită de la server (from -> via -> to) ca o serie de linie, cu culoarea dată.
 function drawTrendLine(line, color) {
   const s = chart.addLineSeries({
     color, lineWidth: 1,
@@ -104,83 +108,118 @@ function drawTrendLine(line, color) {
     autoscaleInfoProvider: () => null,
   });
   s.setData([line.from, line.via, line.to]);
-  trendLines.push({ series: s, end: line.to.value, visible: true });
+  trendLines.push({ series: s, to: line.to, slope: line.slope, last: line.to.time, end: line.to.value, visible: true });
 }
 
-// Încarcă istoric mai vechi (loadOlder din app.js) până când chartul are cel puțin `n`
-// lumânări sau sursa nu mai are istoric. Se oprește și dacă o cerere nu aduce nimic nou.
-async function ensureBars(n) {
-  for (let k = 0; k < 20 && series.data().length < n && !older.done; k++) {
-    const before = series.data().length;
-    if (older.loading) { await new Promise((r) => setTimeout(r, 300)); continue; }
-    await loadOlder();
-    if (series.data().length === before) break;
+// Poziția (indexul) lumânării cu ora `t` pe chart, prin căutare binară; -1 dacă nu există.
+function barIndex(data, t) {
+  let lo = 0, hi = data.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (data[mid].time === t) return mid;
+    if (data[mid].time < t) lo = mid + 1; else hi = mid - 1;
   }
+  return -1;
 }
 
-async function loadTrendLines() {
+// Prelungește liniile de la ultima lumânare închisă până la lumânarea în curs de pe chart.
+// analysis.py lucrează cu poziții (lumânarea 0, 1, 2...), iar chartul are aceleași lumânări ca
+// datastore-ul, deci valoarea la lumânarea curentă = valoarea la `to` + panta × lumânările dintre ele.
+function extendTrendLines() {
+  if (!trendLines.length) return;
+  const data = series.data();
+  if (!data.length) return;
+  const cur = data.length - 1;
+  const time = data[cur].time;
+  let changed = false;
+  for (const l of trendLines) {
+    if (l.last >= time) continue;   // linia ajunge deja până la lumânarea curentă
+    const i = barIndex(data, l.to.time);
+    if (i < 0) continue;            // capătul liniei nu mai e pe chart
+    l.end = l.to.value + l.slope * (cur - i);
+    l.series.update({ time, value: l.end });
+    l.last = time;
+    changed = true;
+  }
+  if (changed) applyTrendFilter();
+}
+
+// Pe 1s–30s indicatorul nu rulează: controlul rămâne pe chart, dar arată de ce nu are linii.
+function setTrendOff(off) {
   if (!trendWidget) return;
-  const job = ++trendJob;
-  const w = trendWidget;
-  w.classList.add("busy");
-  w.querySelector(".indcount").textContent = "…";
-  try {
-    await ensureBars(TREND_BARS);
-    if (job !== trendJob) return;
-    // Ultimele TREND_BARS lumânări de pe chart, inclusiv cea în curs.
-    const bars = series.data().slice(-TREND_BARS)
-      .map(({ time, open, high, low, close }) => ({ time, open, high, low, close }));
-    if (!bars.length) { applyTrendFilter(); return; }
-    const r = await fetch("/api/trendlines", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bars }),
-    });
-    const res = await r.json();
-    if (!r.ok) throw new Error(res.detail || r.statusText);
-    if (job !== trendJob) return;
-    clearTrendLines();
-    for (const l of res.max) drawTrendLine(l, css("--down"));
-    for (const l of res.min) drawTrendLine(l, css("--up"));
-    trendSpan = res.range[1] - res.range[0];
-    applyTrendFilter();
-    w.title = `${res.max.length} prin maxime, ${res.min.length} prin minime ` +
-      `(${res.pivots.max} maxime, ${res.pivots.min} minime în ${res.bars} lumânări)` +
-      (res.bars < TREND_BARS ? ` — istoricul disponibil are doar ${res.bars} lumânări` : "");
-  } catch (e) {
-    if (job === trendJob) { toast("Linii de trend", e.message); applyTrendFilter(); }
-  } finally {
-    if (job === trendJob) w.classList.remove("busy");
+  trendWidget.classList.toggle("off", off);
+  trendWidget.querySelector(".indrefresh").disabled = off;
+  if (off) {
+    trendWidget.classList.remove("busy");
+    trendWidget.querySelector(".indcount").textContent = "—";
+    trendWidget.title = "Indicatorii nu rulează pe 1s–30s (aceste lumânări nu se salvează în datastore). " +
+      "Alege M1 sau un timeframe mai mare.";
   }
 }
 
+// Cere serverului liniile pentru simbolul / timeframe-ul de acum. Rezultatul vine în onResult.
+function requestTrend() {
+  if (!trendWidget || !state.loaded) return;
+  if (state.tf < 60) { clearTrendLines(); setTrendOff(true); return; }
+  setTrendOff(false);
+  if (sendWS({ type: "indicator", id: "trend", params: { bars: TREND_BARS } })) {
+    trendWidget.classList.add("busy");
+    trendWidget.querySelector(".indcount").textContent = "…";
+  }
+}
+
+// Rezultatul de la server: ștergem liniile vechi și le desenăm pe cele noi (rezistențe cu roșu,
+// suporturi cu verde), apoi le prelungim și aplicăm filtrul sliderului.
+function onTrendResult(msg) {
+  const w = trendWidget;
+  // Răspuns pentru alt simbol / timeframe (chartul s-a schimbat între timp): îl ignorăm.
+  if (!w || msg.symbol !== state.symbol || msg.tf !== state.tf) return;
+  w.classList.remove("busy");
+  if (msg.error) { toast("Linii de trend", msg.error); applyTrendFilter(); return; }
+  const res = msg.result;
+  clearTrendLines();
+  for (const l of res.max) drawTrendLine(l, css("--down"));
+  for (const l of res.min) drawTrendLine(l, css("--up"));
+  trendSpan = res.range[1] - res.range[0];
+  extendTrendLines();
+  applyTrendFilter();
+  // Rezumatul calculului, la trecerea mouse-ului peste control.
+  w.title = `${res.max.length} prin maxime, ${res.min.length} prin minime ` +
+    `(${res.pivots.max} maxime, ${res.pivots.min} minime în ultimele ${res.bars} lumânări închise ` +
+    `din datastore, până la ${fmtBarTime(res.last)})` +
+    (res.bars < res.requested ? ` — datastore-ul are doar ${res.bars} lumânări` : "");
+}
+
+// Înregistrarea în meniul de indicatori (vezi indicators.js pentru ce înseamnă fiecare câmp).
 registerIndicator({
   id: "trend",
   name: "Linii de trend",
   icon: "📈",
-  desc: `Drepte valide prin maxime și minime — rulează analysis.py pe ultimele ${TREND_BARS} de lumânări`,
-  note: `Se calculează pe ultimele ${TREND_BARS} de lumânări ale timeframe-ului curent. Sliderul din dreapta sus ascunde liniile depărtate de prețul curent.`,
+  desc: `Drepte valide prin maxime și minime — rulează analysis.py pe ultimele ${TREND_BARS} de lumânări închise din datastore`,
+  note: `Se calculează pe server, din datastore-ul local, pe ultimele ${TREND_BARS} de lumânări închise ` +
+    "ale timeframe-ului curent, și se recalculează la fiecare lumânare închisă. Sliderul din dreapta sus " +
+    "ascunde liniile depărtate de prețul curent.",
   attach() {
     if (trendWidget) return;
     trendWidget = buildTrendWidget();
     applyTrendFilter();
-    // Dacă istoricul e deja pe chart calculăm acum; altfel, când sosește (onHistoryLoaded).
-    if (series.data().length) loadTrendLines();
+    // Dacă istoricul e deja pe chart cerem acum; altfel, când sosește (reload, din indicators.js).
+    requestTrend();
   },
   detach() {
-    trendJob++;
+    sendWS({ type: "indicator_off", id: "trend" });
     clearTrendLines();
     trendWidget?.remove();
     trendWidget = null;
   },
+  // Istoric nou (alt simbol / timeframe / reconectare): liniile vechi nu mai sunt valabile.
+  reload() {
+    clearTrendLines();
+    requestTrend();
+  },
+  onResult: onTrendResult,
+  onNewBar: extendTrendLines,
 });
 
 // Prețul se mișcă: reverificăm de două ori pe secundă care linii sunt destul de aproape.
 setInterval(() => { if (trendLines.length) applyTrendFilter(); }, 500);
-// Apelată de app.js când sosește istoricul pentru un simbol / timeframe nou: liniile vechi
-// nu mai sunt valabile; dacă indicatorul e atașat, le recalculăm după ce chartul se așază.
-window.onHistoryLoaded = () => {
-  trendJob++;
-  clearTrendLines();
-  renderIndicators();
-  if (trendWidget) setTimeout(loadTrendLines, 300);
-};

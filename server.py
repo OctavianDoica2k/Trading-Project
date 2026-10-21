@@ -1,5 +1,6 @@
 """
-Server de prețuri live -> browser, prin WebSocket. Sursa prețurilor se alege cu PRICE_SOURCE în .env:
+Server de prețuri live -> browser, prin WebSocket. Serverul pornește pe sursa din PRICE_SOURCE (.env,
+implicit cTrader); în timpul rulării sursa se poate schimba din pagină (lista din bara de sus):
   - ctrader : cTrader Open API, prin internet, fără niciun program deschis
               (configurare o singură dată: python ctrader_setup.py);
   - mt5     : terminalul MetaTrader 5 (ex. FBS), care trebuie să fie pornit și logat pe PC.
@@ -21,7 +22,7 @@ Pornire:
 #
 #  Biblioteci folosite:
 #   - websockets  : conexiunea cu cTrader (în ctrader.py).
-#   - MetaTrader5 : legătura cu terminalul MT5 (în mt5feed.py, doar cu PRICE_SOURCE=mt5).
+#   - MetaTrader5 : legătura cu terminalul MT5 (în mt5feed.py, doar când sursa e MT5).
 #   - FastAPI     : framework web – definește adresele (rutele) serverului.
 #   - uvicorn     : serverul web propriu-zis, care rulează aplicația FastAPI.
 #   - dotenv      : citește setările din fișierul .env (parole SMTP, date cTrader etc.).
@@ -36,6 +37,8 @@ Pornire:
 # socket    : folosit doar ca să aflăm IP-ul PC-ului în rețeaua locală.
 # sys       : acces la consola (stdout/stderr).
 # time      : ora curentă, în milisecunde.
+# csv       : scrierea fișierelor CSV exportate.
+# uuid      : identificatori unici pentru exporturi.
 import asyncio
 import csv
 import json
@@ -45,6 +48,10 @@ import socket
 import sys
 import time
 import uuid
+# ProcessPoolExecutor: procese separate pentru calculul indicatorilor; BrokenProcessPool = eroarea
+# primită când unul dintre aceste procese a murit.
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 # asynccontextmanager: permite scrierea codului de pornire/oprire a serverului într-o singură funcție.
 from contextlib import asynccontextmanager
 # datetime: formatarea orelor (UTC) din fișierele CSV exportate.
@@ -75,22 +82,28 @@ load_dotenv(ROOT / ".env")
 
 # Modulele proiectului: alarmele + e-mailul (alerts.py), notificările push (push.py)
 # și conexiunea cu cTrader (ctrader.py). mt5feed.py se încarcă doar dacă e folosit (mai jos).
+import indicators as calc  # noqa: E402 - calculul indicatorilor (în procese separate)
+import mtf  # noqa: E402 - zilele din datastore pentru „Trend multi-timeframe”
 from alerts import AlertStore, Mailer, valid_email  # noqa: E402 - după load_dotenv
 from ctrader import PERIODS, CTraderError, CTraderFeed, TokenStore  # noqa: E402
+from datastore import Datastore  # noqa: E402 - baza de date locală cu lumânări
+from heikin_aishi import heikin_ashi  # noqa: E402 - lumânările Heikin-Ashi de pe chart
+import fastframe  # noqa: E402 - rulează heikin_ashi() repede (vezi fastframe.py)
 from push import PushService  # noqa: E402
 
 # --- Constante de configurare ---
 HISTORY_BARS = 600      # câte lumânări trimitem la conectare pentru timeframe-urile sub un minut
-# De la M1 în sus trimitem la conectare cel puțin un an de lumânări (an calendaristic întreg),
-# dar cel mult MAX_INITIAL_BARS; restul istoricului se încarcă la derularea chartului spre stânga,
-# câte OLDER_BARS lumânări odată (vezi /api/bars).
-YEAR_S = 366 * 86400
+# De la M1 în sus trimitem la conectare ultimele MAX_INITIAL_BARS lumânări închise din datastore
+# (+ lumânarea în curs, de la sursă); restul istoricului se încarcă la derularea chartului spre
+# stânga, câte OLDER_BARS lumânări odată (vezi /api/bars): întâi din datastore, apoi de la sursă.
 MAX_INITIAL_BARS = 10_000
 OLDER_BARS = 5000
 RECENT_TICKS = 600      # câte ticuri trimitem pentru chartul de ticuri
 # Pentru lumânările sub un minut cerem ticuri în bucăți (vezi CTraderFeed.ticks); cel mult
 # atâtea bucăți, ca deschiderea chartului să nu dureze prea mult.
 MAX_TICK_PAGES = 12
+# Cât așteptăm istoricul pentru o pagină nouă înainte să-i spunem să reîncerce (secunde).
+HELLO_TIMEOUT = 30
 
 # Timeframe-uri suportate (secunde). Sub 60s lumânările se construiesc din ticuri; de la M1 în
 # sus le primim gata calculate de la sursa de prețuri (vezi PERIODS în ctrader.py).
@@ -101,8 +114,8 @@ TF_LABELS = {0: "ticuri", 1: "1s", 5: "5s", 15: "15s", 30: "30s", 60: "M1", 300:
              1800: "M30", 3600: "H1", 14400: "H4", 86400: "D1", 604800: "W1"}
 # Folderul în care se salvează exporturile CSV (câte un subfolder pentru fiecare simbol).
 EXPORT_DIR = ROOT / "exporturi_csv"
-# Baza de date locală cu lumânări, completată automat la fiecare simbol / timeframe deschis:
-# datastore/<sursă>/<SIMBOL>/<TIMEFRAME>/<SIMBOL>_<TIMEFRAME>.csv (vezi „Datastore local”).
+# Baza de date locală cu lumânări, ținută la zi pentru simbolul / timeframe-ul deschis:
+# datastore/<sursă>/<SIMBOL>/<TIMEFRAME>/<SIMBOL>_<TIMEFRAME>.csv (vezi datastore.py).
 DATASTORE_DIR = ROOT / "datastore"
 
 # Folderul cu fișierele paginii web (HTML, CSS, JavaScript).
@@ -110,9 +123,16 @@ STATIC = ROOT / "static"
 # Adresa și portul pe care ascultă serverul (pot fi schimbate din .env).
 HOST = os.getenv("HOST", "0.0.0.0")   # 0.0.0.0 = accesibil și de pe telefon din rețeaua locală
 PORT = int(os.getenv("PORT", "8000"))
-# Sursa prețurilor: "ctrader" sau "mt5".
+# Se schimbă la fiecare pornire a serverului: pagina îl primește în hello și, la prima deschidere
+# după o repornire, pornește cu chartul fără indicatori (indicators.js).
+BOOT_ID = f"{time.time_ns():x}"
+# Sursele de prețuri: id (folosit în .env, în adrese și în datastore) -> nume afișat.
+SOURCES = {"mt5": "MT5", "ctrader": "cTrader"}
+# Sursa activă: la pornire cea din .env (implicit cTrader); se poate schimba din pagină, până la
+# următoarea repornire (vezi use_source).
 PRICE_SOURCE = os.getenv("PRICE_SOURCE", "ctrader").strip().lower()
-SOURCE_NAME = "MT5" if PRICE_SOURCE == "mt5" else "cTrader"
+SOURCE_NAME = SOURCES.get(PRICE_SOURCE, PRICE_SOURCE)
+CTRADER_TOKEN_FILE = Path(os.getenv("CTRADER_TOKEN_FILE", ROOT / "ctrader_token.json"))
 
 
 # =====================================================================================
@@ -192,26 +212,74 @@ class TickHub:
         self.loop.call_soon_threadsafe(self._push, None, json.dumps(msg))
 
 
+# =====================================================================================
+#  Sursa de prețuri (MT5 sau cTrader), aleasă la pornire și schimbabilă din pagină
+# -------------------------------------------------------------------------------------
+#  `feed` e sursa activă; tot restul serverului o folosește prin această variabilă globală.
+#  La schimbare (use_source) oprim conexiunea veche, creăm și pornim una nouă, apoi anunțăm
+#  paginile, care își cer din nou istoricul de la noua sursă.
+# =====================================================================================
+# De ce nu se poate folosi o sursă acum (text pentru pagină), sau None dacă se poate.
+def source_problem(source: str) -> str | None:
+    if source == "mt5":
+        try:
+            import MetaTrader5  # noqa: F401 - verificăm doar că pachetul există
+        except ImportError:
+            return "lipsește pachetul MetaTrader5 (pip install MetaTrader5, doar pe Windows)"
+        return None
+    if source == "ctrader":
+        if not os.getenv("CTRADER_CLIENT_ID", "").strip() or not os.getenv("CTRADER_CLIENT_SECRET", "").strip():
+            return "lipsesc CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET din .env"
+        if not TokenStore(CTRADER_TOKEN_FILE).configured:
+            return "lipsește tokenul; rulează o dată: python ctrader_setup.py"
+        return None
+    return f"sursă necunoscută: {source}"
+
+
+# O conexiune nouă cu sursa (de fiecare dată una nouă, ca să citească tokenul / setările curente).
+def make_feed(source: str):
+    if source == "mt5":
+        from mt5feed import MT5Feed  # doar pe Windows, cu pachetul MetaTrader5
+        f = MT5Feed()
+    else:
+        f = CTraderFeed(os.getenv("CTRADER_CLIENT_ID", "").strip(),
+                        os.getenv("CTRADER_CLIENT_SECRET", "").strip(), TokenStore(CTRADER_TOKEN_FILE))
+    # Fiecare tic primit de la sursa de prețuri trece prin hub.
+    f.on_ticks = hub.ticks
+    # Paginile află când cade sau revine conexiunea cu sursa (la revenire își reîncarcă istoricul).
+    # Mesajele unei surse care nu mai e activă (oprită la schimbare) sunt ignorate.
+    f.on_status = lambda up: f is feed and hub.broadcast({"type": "feed", "up": up})
+    return f
+
+
+feed = None                  # sursa activă (setată în lifespan, la pornire)
+feed_task: asyncio.Task | None = None
+source_lock = asyncio.Lock()   # o singură schimbare de sursă odată
+
+
+# Oprește sursa activă (dacă există) și o pornește pe cea cerută. Alegerea nu se salvează:
+# la repornire serverul pleacă din nou de la PRICE_SOURCE (implicit cTrader).
+async def use_source(source: str):
+    global feed, feed_task, PRICE_SOURCE, SOURCE_NAME
+    async with source_lock:
+        if feed_task:
+            feed.on_status = None   # oprirea voită nu e o „deconectare” de anunțat paginilor
+            feed_task.cancel()
+            await asyncio.gather(feed_task, return_exceptions=True)
+        feed = make_feed(source)
+        PRICE_SOURCE, SOURCE_NAME = source, SOURCES[source]
+        feed_task = asyncio.create_task(feed.run())
+        hub.sync()
+        print(f"[WEB] sursa prețurilor: {SOURCE_NAME}")
+
+
 # --- Crearea obiectelor principale și legarea lor între ele ---
-# feed    : sursa de prețuri – terminalul MT5 sau cTrader (datele aplicației din .env, tokenul
-#           din ctrader_token.json).
 # hub     : distribuie ticurile.
 # alerts  : alarmele de preț (fișierul alerts.json poate fi schimbat cu variabila ALERTS_FILE).
-if PRICE_SOURCE == "mt5":
-    from mt5feed import MT5Feed  # noqa: E402 - doar pe Windows, cu pachetul MetaTrader5
-    feed = MT5Feed()
-else:
-    feed = CTraderFeed(os.getenv("CTRADER_CLIENT_ID", "").strip(),
-                       os.getenv("CTRADER_CLIENT_SECRET", "").strip(),
-                       TokenStore(Path(os.getenv("CTRADER_TOKEN_FILE", ROOT / "ctrader_token.json"))))
 hub = TickHub()
 alerts = AlertStore(Path(os.getenv("ALERTS_FILE", ROOT / "alerts.json")), Mailer())
-# Fiecare tic primit de la sursa de prețuri trece prin hub.
-feed.on_ticks = hub.ticks
-# Paginile află când cade sau revine conexiunea cu sursa (la revenire își reîncarcă istoricul).
-feed.on_status = lambda up: hub.broadcast({"type": "feed", "up": up})
 # hub-ul îi spune sursei de prețuri ce simboluri să urmărească ...
-hub.on_wanted = feed.want
+hub.on_wanted = lambda names: feed and feed.want(names)
 # ... și întreabă alarmele ce simboluri trebuie urmărite permanent ...
 hub.watched = alerts.active_symbols
 # ... și le trimite fiecare tic nou, ca să verifice prețurile țintă.
@@ -247,20 +315,22 @@ async def keep_synced():
 # Tot ce e înainte de `yield` rulează la pornire; tot ce e după, la oprire.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Fără datele cTrader aplicația nu are sens, așa că oprim pornirea cu un mesaj clar.
-    if PRICE_SOURCE == "ctrader":
-        if not feed.client_id or not feed.client_secret:
-            raise RuntimeError("Lipsesc CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET din .env (vezi .env.example)")
-        if not feed.tokens.configured:
-            raise RuntimeError("Lipsește tokenul cTrader. Rulează întâi: python ctrader_setup.py "
-                               "(sau pune PRICE_SOURCE=mt5 în .env ca să folosești terminalul MT5)")
-    elif PRICE_SOURCE != "mt5":
-        raise RuntimeError(f"PRICE_SOURCE necunoscut: {PRICE_SOURCE} (folosește ctrader sau mt5)")
-    print(f"[WEB] sursa prețurilor: {SOURCE_NAME}")
+    # Sursa din .env; dacă nu se poate folosi (ex. cTrader fără token), trecem pe cealaltă.
+    source = PRICE_SOURCE
+    if source not in SOURCES:
+        raise RuntimeError(f"PRICE_SOURCE necunoscut: {source} (folosește ctrader sau mt5)")
+    if problem := source_problem(source):
+        other = next(s for s in SOURCES if s != source)
+        if source_problem(other):
+            raise RuntimeError(f"{SOURCES[source]}: {problem}")
+        print(f"[WEB] {SOURCES[source]} indisponibil ({problem}); folosesc {SOURCES[other]}")
+        source = other
     hub.loop = asyncio.get_running_loop()
+    # Procesele pentru calculul indicatorilor (pornesc acum, ca primul calcul să nu aștepte după ele).
+    get_pool()
     # Pornim conexiunea permanentă cu sursa și sincronizarea abonărilor, în fundal.
-    tasks = [asyncio.create_task(feed.run()), asyncio.create_task(keep_synced())]
-    hub.sync()
+    await use_source(source)
+    tasks = [asyncio.create_task(keep_synced())]
     # Așteptăm puțin prima conectare, ca mesajele de mai jos să apară după „conectat”.
     try:
         await asyncio.wait_for(feed.ready.wait(), 20)
@@ -274,10 +344,12 @@ async def lifespan(_app: FastAPI):
     if not alerts.mailer.configured:
         print("[ALERT] SMTP neconfigurat: alarmele apar în pagină, dar nu se trimit e-mailuri (vezi .env.example)")
     yield
-    # La oprire: oprim conexiunea cu sursa de prețuri.
-    for t in tasks:
+    # La oprire: oprim conexiunea cu sursa de prețuri, actualizarea datastore-ului și calculele.
+    for t in [*tasks, feed_task, *(p.keeper for p in PAIRS.values() if p.keeper)]:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    if pool:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # Aplicația web propriu-zisă.
@@ -329,12 +401,47 @@ async def index():
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
-# Lista simbolurilor din cont, pentru sugestiile din câmpul de simbol al paginii.
-# "visible" = cele afișate/active (Market Watch la MT5), "all" = toate simbolurile brokerului.
+# Lista simbolurilor sursei active. "visible" = cele afișate/active (Market Watch la MT5), "all" =
+# toate simbolurile brokerului (sugestiile din fereastra de export); "tree" = simbolurile cu
+# descrierea și categoria lor, pentru meniul de simboluri din bara de sus.
 @app.get("/api/symbols")
 async def symbols():
     visible, everything = feed.symbol_names()
-    return JSONResponse({"visible": visible, "all": everything})
+    return JSONResponse({"source": PRICE_SOURCE, "visible": visible, "all": everything,
+                         "tree": feed.symbol_tree()})
+
+
+# ---------- Sursa prețurilor ----------
+# Sursele disponibile, pentru lista din bara de sus: care e activă, dacă e conectată și, pentru
+# cele care nu se pot folosi, de ce (ex. cTrader fără token).
+@app.get("/api/sources")
+async def list_sources():
+    return {"active": PRICE_SOURCE, "connected": feed.ready.is_set(),
+            "sources": [{"id": s, "name": n, "problem": source_problem(s)} for s, n in SOURCES.items()]}
+
+
+# Datele trimise de pagină la schimbarea sursei: {"source": "mt5"} sau {"source": "ctrader"}.
+class SourceIn(BaseModel):
+    source: str
+
+
+# Schimbă sursa prețurilor pentru tot serverul (toate paginile, alarmele, exporturile).
+@app.post("/api/source")
+async def set_source(s: SourceIn):
+    if s.source not in SOURCES:
+        raise HTTPException(400, f"Sursă necunoscută: {s.source}")
+    if problem := source_problem(s.source):
+        raise HTTPException(400, f"{SOURCES[s.source]}: {problem}")
+    if s.source != PRICE_SOURCE:
+        await use_source(s.source)
+        # Paginile se reconectează și primesc istoricul de la noua sursă.
+        hub.broadcast({"type": "source", "source": s.source, "name": SOURCE_NAME})
+    # Așteptăm cel mult 15 s conectarea, ca răspunsul să spună dacă sursa e deja gata.
+    try:
+        await asyncio.wait_for(feed.ready.wait(), 15)
+    except asyncio.TimeoutError:
+        pass
+    return {"active": PRICE_SOURCE, "connected": feed.ready.is_set()}
 
 
 # ---------- Alarme ----------
@@ -512,8 +619,9 @@ def candles_from_ticks(ticks: list[tuple[int, float]], tf: int, limit: int | Non
 # Combină ticurile bid și ask (vin separat de la cTrader) în [timp_ms, bid, ask]: la fiecare
 # moment folosim ultimul bid și ultimul ask cunoscute. Întoarce ultimele `count` ticuri.
 def merge_ticks(bid: list[tuple[int, float]], ask: list[tuple[int, float]], count: int) -> list[list]:
+    # Toate schimbările de preț, în ordinea timpului: (timp, 0 = bid / 1 = ask, preț).
     events = sorted([(t, 0, p) for t, p in bid] + [(t, 1, p) for t, p in ask])
-    b = a = None
+    b = a = None   # ultimul bid / ask cunoscut (None până la primul)
     out: list[list] = []
     for t, side, p in events:
         if side == 0:
@@ -531,21 +639,26 @@ def merge_ticks(bid: list[tuple[int, float]], ask: list[tuple[int, float]], coun
 
 
 # Pregătește primul mesaj („hello”) trimis unei pagini proaspăt conectate:
-# informații despre simbol + istoricul de lumânări + ultimele ticuri.
-async def build_hello(symbol: str, tf: int) -> dict:
+# informații despre simbol + istoricul de lumânări + ultimele ticuri, de la sursa `feed`.
+# De la M1 în sus, lumânările închise vin din datastore-ul perechii `pair` (deja adus la zi), ca
+# chartul și indicatorii să vadă exact aceleași date; doar lumânarea în curs vine de la sursă.
+async def build_hello(feed, symbol: str, tf: int, pair: "Pair | None") -> dict:
     info = await feed.info(symbol)
     last = await feed.quote(symbol)
     # Istoricul se termină la ultimul tic (în weekend, la închiderea pieței de vineri).
     end = (last[0] if last else int(time.time() * 1000)) + 1
     if tf in PERIODS:
-        # M1 și peste: lumânările vin gata calculate de la sursa de prețuri (cel puțin un an).
-        count = min(-(-YEAR_S // tf), MAX_INITIAL_BARS)
-        bars = await feed.trendbars(symbol, tf, count, end)
+        # Lumânările închise din datastore + ce e mai nou de la sursă (lumânarea în curs).
+        bars = await pair.store.load_bars(MAX_INITIAL_BARS)
+        closed = bars[-1]["time"] if bars else 0
+        bars += [b for b in await feed.trendbars(symbol, tf, 3, end) if b["time"] > closed]
+        # Ticurile bid din ultima oră, pentru chartul de ticuri.
         bid = await feed.ticks(symbol, "BID", end - 3600_000, end, max_pages=1)
     else:
         # Sub un minut: le construim din ticurile bid ale ultimelor HISTORY_BARS intervale.
         bid = await feed.ticks(symbol, "BID", end - tf * HISTORY_BARS * 1000, end, max_pages=MAX_TICK_PAGES)
         bars = candles_from_ticks(bid, tf)
+    # Ticurile ask din ultima oră, combinate apoi cu cele bid în [timp, bid, ask].
     ask = await feed.ticks(symbol, "ASK", end - 3600_000, end, max_pages=1)
     return {
         "type": "hello",
@@ -559,11 +672,13 @@ async def build_hello(symbol: str, tf: int) -> dict:
         "last": last,
         "recent": merge_ticks(bid, ask, RECENT_TICKS),
         "bars": bars,
+        "boot": BOOT_ID,
     }
 
 
 # Lumânări mai vechi decât `before` (secunde UTC), cerute de pagină când chartul e derulat spre
-# stânga. O listă goală înseamnă că sursa nu mai are istoric.
+# stânga: întâi din datastore (aceleași date ca indicatorii), iar dincolo de începutul lui, de la
+# sursă. O listă goală înseamnă că sursa nu mai are istoric.
 @app.get("/api/bars")
 async def older_bars(symbol: str, tf: int, before: int):
     name = feed.resolve(symbol)
@@ -572,7 +687,10 @@ async def older_bars(symbol: str, tf: int, before: int):
     end = before * 1000
     try:
         if tf in PERIODS:
-            bars = await feed.trendbars(name, tf, OLDER_BARS, end)
+            bars = await STORE.get(PRICE_SOURCE, name, tf).load_before(before, OLDER_BARS)
+            # Am ajuns la începutul datastore-ului: continuăm direct de la sursă.
+            if not bars:
+                bars = await feed.trendbars(name, tf, OLDER_BARS, end)
         else:
             # Sub un minut: aflăm din ultima lumânare M1 unde se termină istoricul (în weekend
             # sau de sărbători nu există ticuri), apoi construim lumânările din ticurile de dinainte.
@@ -587,100 +705,231 @@ async def older_bars(symbol: str, tf: int, before: int):
     return {"bars": bars}
 
 
-# ---------- Linii de trend (analysis.py) ----------
-# Indicatorul „Linii de trend” trimite ultimele lumânări de pe chart. Rulăm pe ele partea a 2-a din
-# analysis.py (după linia #----#), exact cum e scrisă: ea citește `df` și umple listele maxim,
-# minim, dr_max_valid și dr_min_valid. Fișierul e citit la fiecare cerere, deci o modificare în
-# analysis.py se vede la următoarea apăsare, fără repornirea serverului.
-ANALYSIS = Path(__file__).with_name("analysis.py")
-# Câte lumânări în spate analizează indicatorul (cele mai noi). Algoritmul verifică fiecare
-# pereche de pivoturi pe toate lumânările de după ea; cu accesul rapid de mai jos (FastFrame)
-# durează ~2–3 s la 1000 de lumânări.
-TREND_MAX_BARS = 1000
+# Lumânările Heikin-Ashi pentru lumânările trimise de pagină (afișarea „Heikin-Ashi” de pe chart),
+# calculate cu heikin_ashi() din heikin_aishi.py. Pagina trimite toate lumânările încărcate, ca
+# prima lumânare Heikin-Ashi să pornească mereu de la începutul istoricului de pe chart.
+class BarsIn(BaseModel):
+    bars: list[dict]   # [{time, open, high, low, close}, ...] în ordine cronologică
 
 
-# analysis.py citește lumânările cu df.iloc[i]['high'] de milioane de ori. Pe un DataFrame
-# pandas, fiecare astfel de citire durează ~20 µs (1000 de lumânări = minute). FastFrame oferă
-# exact aceleași citiri (len(df), df.iloc[i]['open' / 'high' / 'low' / 'close']), dar dintr-o
-# listă pregătită dinainte, de sute de ori mai repede. Valorile rămân numpy.float64, ca în
-# pandas, deci rezultatele sunt identice (inclusiv împărțirea la 0 -> inf la pivoturi egale).
-class FastFrame:
-    class _Rows:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def __getitem__(self, i):
-            return self.rows[i]
-
-    def __init__(self, df):
-        cols = {c: df[c].to_numpy() for c in ("open", "high", "low", "close")}
-        self.iloc = self._Rows([{c: a[i] for c, a in cols.items()} for i in range(len(df))])
-        self._len = len(df)
-
-    def __len__(self):
-        return self._len
-
-
-class TrendBarsIn(BaseModel):
-    bars: list[dict]   # lumânările de pe chart: {time, open, high, low, close}
-
-
-def run_trend_analysis(bars: list[dict]) -> dict:
-    import numpy as np
-    import pandas as pd  # doar aici, ca restul serverului să nu depindă de pandas
-
-    src = ANALYSIS.read_text(encoding="utf-8")
-    parts = re.split(r"^#-{5,}#\s*$", src, maxsplit=1, flags=re.M)
-    if len(parts) < 2:
-        raise ValueError("Nu găsesc linia #----# care separă partea a 2-a din analysis.py")
-    df = pd.DataFrame(bars, columns=["time", "open", "high", "low", "close"])
-    code = compile(parts[1], str(ANALYSIS), "exec")
-    # errstate: împărțirea la 0 (două pivoturi la același preț) dă inf fără avertismente în consolă.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ns = {"df": FastFrame(df), "pd": pd}
-        try:
-            exec(code, ns)
-        except (AttributeError, TypeError, KeyError):
-            # analysis.py folosește ceva ce FastFrame nu are (ex. df['close'], df.sort_values):
-            # rulăm din nou pe DataFrame-ul pandas obișnuit (mai lent, dar merge orice).
-            ns = {"df": df, "pd": pd}
-            exec(code, ns)
-
-    # Fiecare dreaptă validă e o pereche (i, j) de poziții din maxim / minim; un punct e
-    # (indexul lumânării în df, prețul). O desenăm de la primul punct până la ultima lumânare.
-    last = len(df) - 1
-
-    def lines(points, pairs):
-        out = []
-        for i, j in pairs:
-            (x1, y1), (x2, y2) = points[i], points[j]
-            y_end = y1 + (y2 - y1) / (x2 - x1) * (last - x1)
-            out.append({"from": {"time": bars[x1]["time"], "value": float(y1)},
-                        "via": {"time": bars[x2]["time"], "value": float(y2)},
-                        "to": {"time": bars[last]["time"], "value": float(y_end)}})
-        return out
-
-    return {"max": lines(ns["maxim"], ns["dr_max_valid"]),
-            "min": lines(ns["minim"], ns["dr_min_valid"]),
-            "pivots": {"max": len(ns["maxim"]), "min": len(ns["minim"])},
-            # Intervalul de preț al lumânărilor analizate: sliderul măsoară distanța liniilor
-            # față de prețul curent ca procent din el.
-            "range": [float(df["low"].min()), float(df["high"].max())],
-            "bars": len(df)}
-
-
-@app.post("/api/trendlines")
-async def trendlines(t: TrendBarsIn):
-    bars = t.bars[-TREND_MAX_BARS:]
-    if len(bars) < 7:
-        raise HTTPException(400, "Sunt prea puține lumânări pe chart (minimum 7)")
+# Primește lumânările normale și întoarce lumânările Heikin-Ashi corespunzătoare.
+@app.post("/api/heikin_ashi")
+async def heikin_ashi_bars(b: BarsIn):
+    if not b.bars:
+        return {"bars": []}
     try:
-        # Calculul e lent și blocant: îl rulăm pe un fir separat, ca prețurile live să nu se oprească.
-        result = await asyncio.to_thread(run_trend_analysis, bars)
-    except Exception as e:
-        raise HTTPException(500, f"Eroare în analysis.py: {type(e).__name__}: {e}") from e
-    result["truncated"] = len(t.bars) > TREND_MAX_BARS
-    return result
+        # fastframe rulează aceeași funcție pe un tabel rapid (sub o secundă pe 10.000 de
+        # lumânări); într-un fir separat, ca ticurile să meargă mai departe și dacă se ajunge
+        # la pandas (mult mai lent).
+        return {"bars": await asyncio.to_thread(fastframe.run, heikin_ashi, b.bars)}
+    except Exception as e:  # noqa: BLE001 - orice eroare din funcție ajunge în pagină
+        raise HTTPException(500, f"heikin_ashi() din heikin_aishi.py: {type(e).__name__}: {e}") from e
+
+
+# ---------- Datastore local și indicatori ----------
+# Lumânările închise ale fiecărui simbol / timeframe (M1–W1) deschis într-o pagină se țin pe disc,
+# în datastore/ (regulile sunt în datastore.py). Drumul live nu trece pe aici: ticurile merg doar
+# prin memorie (sursă -> TickHub -> WebSocket -> chart). Drumul de analiză:
+#   1. La deschiderea perechii, datastore-ul se aduce la zi (prima dată: ultimele 10.000 de
+#      lumânări), cu progresul trimis paginii (mesajul "store"); abia apoi pagina primește hello-ul,
+#      cu lumânările închise luate din datastore + lumânarea în curs de la sursă.
+#   2. Cât timp perechea e deschisă, la închiderea fiecărei lumânări (+ CLOSE_DELAY secunde) serverul
+#      cere lumânarea oficială și o adaugă (Pair.keep).
+#   3. Indicatorii citesc doar din datastore (load_bars), într-un proces separat, cu rezultatul ținut
+#      în cache; pagina trimite doar id-ul și parametrii indicatorului, iar rezultatul vine înapoi
+#      prin mesajul "indicator", și din nou după fiecare lumânare închisă.
+STORE = Datastore(DATASTORE_DIR)
+# Câte secunde după închiderea unei lumânări o cerem de la sursă (sursa are nevoie de un moment
+# ca s-o finalizeze).
+CLOSE_DELAY = 3
+# Procesele pentru calculul indicatorilor (create la pornire, în lifespan).
+INDICATOR_WORKERS = 2
+pool: ProcessPoolExecutor | None = None
+# Rezultatele recente: (pereche, indicator, parametri, versiunea datelor) -> Future cu rezultatul.
+# Aceleași date + aceiași parametri = același rezultat, deci un calcul se face o singură dată
+# chiar dacă îl cer mai multe pagini sau butonul ↻.
+IND_CACHE: dict[tuple, asyncio.Future] = {}
+IND_CACHE_SIZE = 64
+
+
+class Conn:
+    """O pagină conectată: coada mesajelor perechii ei (datastore, indicatori) și indicatorii ceruți."""
+
+    def __init__(self):
+        # Coada mesajelor de „control” (progres datastore, rezultate indicatori), separată de
+        # coada ticurilor; ws_endpoint le trimite pe amândouă paginii.
+        self.ctrl: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self.indicators: dict[str, dict] = {}   # id -> parametri
+
+    # Pune un mesaj în coadă (ca text JSON). Coadă plină = pagina nu mai citește: aruncăm cel
+    # mai vechi mesaj, ca memoria să nu crească la nesfârșit.
+    def send(self, msg: dict):
+        if self.ctrl.full():
+            self.ctrl.get_nowait()
+        self.ctrl.put_nowait(json.dumps(msg))
+
+
+class Pair:
+    """O pereche sursă / simbol / timeframe deschisă în cel puțin o pagină."""
+
+    def __init__(self, feed, source: str, name: str, tf: int):
+        self.feed, self.source, self.name, self.tf = feed, source, name, tf
+        self.store = STORE.get(source, name, tf)   # fișierul din datastore al perechii
+        self.conns: set[Conn] = set()              # paginile care au perechea deschisă
+        self.digits = 5
+        self.keeper: asyncio.Task | None = None    # sarcina care ține datastore-ul la zi (keep)
+        self._sync: asyncio.Task | None = None     # sincronizarea în curs (dacă există)
+
+    # Numele perechii în mesajele din consolă, ex. „ctrader/EURUSD/M1”.
+    @property
+    def label(self) -> str:
+        return f"{self.source}/{self.name}/{TF_LABELS[self.tf]}"
+
+    # Trimite un mesaj tuturor paginilor perechii.
+    def broadcast(self, msg: dict):
+        for c in list(self.conns):
+            c.send(msg)
+
+    # Progresul / starea datastore-ului, către toate paginile perechii.
+    def report(self, status: dict):
+        self.broadcast({"type": "store", "symbol": self.name, "tf": self.tf, **status})
+
+    # O singură sincronizare odată: cine o cere în timp ce rulează o așteaptă pe aceeași. Nu se
+    # oprește dacă pagina care a pornit-o se închide (descărcarea rămâne utilă).
+    async def sync(self) -> bool:
+        if self._sync is None or self._sync.done():
+            self._sync = asyncio.create_task(self.store.sync(self.feed, self.digits, self.report))
+            self._sync.add_done_callback(lambda t: t.cancelled() or t.exception())
+        return await asyncio.shield(self._sync)
+
+    # Pornește keep() în fundal, dacă nu rulează deja.
+    def start_keeper(self):
+        if self.keeper is None or self.keeper.done():
+            self.keeper = asyncio.create_task(self.keep())
+
+    # Ține datastore-ul la zi: se trezește la închiderea fiecărei lumânări (după grila lumânărilor
+    # salvate) + CLOSE_DELAY și cere lumânarea oficială. Cel mult o oră între verificări (D1 / W1
+    # se mută cu o oră la trecerea pe ora de vară / iarnă). Dacă s-a adăugat ceva, recalculează
+    # indicatorii paginilor.
+    async def keep(self):
+        while True:
+            last = self.store.last_time()
+            now = time.time()
+            # Ora la care se închide lumânarea în curs: ultima salvată + un număr întreg de
+            # timeframe-uri, prima după „acum”. Fără lumânări salvate: peste un minut.
+            wake = now + 60 if last is None else last + (int((now - last) // self.tf) + 1) * self.tf
+            await asyncio.sleep(max(1.0, min(wake, now + 3600) - now + CLOSE_DELAY))
+            try:
+                changed = await self.sync()
+            except Exception as e:  # noqa: BLE001 - reîncercăm la următoarea închidere
+                print(f"[DATASTORE] {self.label}: actualizare eșuată: {type(e).__name__}: {e}")
+                continue
+            if changed:
+                for c in list(self.conns):
+                    for ind_id, params in list(c.indicators.items()):
+                        await send_indicator(self, c, ind_id, params)
+
+
+# Perechile deschise acum: (sursă, simbol, timeframe) -> Pair.
+PAIRS: dict[tuple[str, str, int], Pair] = {}
+
+
+# O pagină deschide perechea: o creăm dacă e prima pagină, altfel o refolosim, și adăugăm pagina.
+def join_pair(feed, source: str, name: str, tf: int, conn: Conn, digits: int) -> Pair:
+    key = (source, name, tf)
+    pair = PAIRS.get(key)
+    if pair is None:
+        pair = PAIRS[key] = Pair(feed, source, name, tf)
+    pair.feed, pair.digits = feed, digits   # după o reconectare, sursa e un obiect nou
+    pair.conns.add(conn)
+    return pair
+
+
+# Ultima pagină a perechii s-a închis: oprim actualizarea și eliberăm memoria (fișierul rămâne;
+# la redeschidere, sincronizarea completează golul).
+def leave_pair(pair: Pair, conn: Conn):
+    pair.conns.discard(conn)
+    # Mai sunt pagini pe pereche (sau perechea a fost deja înlocuită): nu oprim nimic.
+    if pair.conns or PAIRS.get((pair.source, pair.name, pair.tf)) is not pair:
+        return
+    del PAIRS[(pair.source, pair.name, pair.tf)]
+    if pair.keeper:
+        pair.keeper.cancel()
+    task = asyncio.create_task(pair.store.unload())
+    STORE_TASKS.add(task)
+    task.add_done_callback(STORE_TASKS.discard)
+
+
+STORE_TASKS: set[asyncio.Task] = set()   # referințe la sarcinile de fundal (altfel pot fi oprite)
+
+
+# Procesele de calcul, create la prima nevoie (sau din nou, după ce au murit: pool = None).
+def get_pool() -> ProcessPoolExecutor:
+    global pool
+    if pool is None:
+        pool = ProcessPoolExecutor(max_workers=INDICATOR_WORKERS)
+    return pool
+
+
+# Calculează un indicator pe ultimele lumânări închise din datastore (load_bars), în procesul
+# separat, cu cache.
+# Un indicator poate fi pe chart de mai multe ori (ex. medii mobile cu perioade diferite): pagina
+# trimite id-ul copiei, „sma#2”; tipul indicatorului e partea dinainte de „#”.
+def ind_type(ind_id: str) -> str:
+    return ind_id.split("#", 1)[0]
+
+
+# Calculul propriu-zis: citește lumânările din datastore, caută rezultatul în cache și, dacă nu
+# e acolo, îl calculează în procesul separat (calc.compute din indicators.py).
+async def compute_indicator(pair: Pair, ind_id: str, params: dict) -> dict:
+    global pool
+    ind_id = ind_type(ind_id)   # copiile cu aceiași parametri împart calculul și cache-ul
+    spec = calc.SPECS[ind_id]
+    n = spec["bars"](params)    # câte lumânări cere indicatorul cu acești parametri
+    bars = await pair.store.load_bars(n)
+    if len(bars) < spec["min"]:
+        raise ValueError(f"datastore-ul are doar {len(bars)} lumânări (minimum {spec['min']})")
+    try:
+        code_v = calc.ANALYSIS.stat().st_mtime_ns   # analysis.py modificat = rezultat nou
+    except OSError:
+        code_v = 0
+    # Cheia cache-ului: orice schimbare (date, parametri, cod) dă o cheie nouă = calcul nou.
+    key = (pair.source, pair.name, pair.tf, ind_id, n, json.dumps(params, sort_keys=True),
+           pair.store.version, bars[-1]["time"], len(bars), code_v)
+    fut = IND_CACHE.get(key)
+    if fut is None:
+        try:
+            fut = asyncio.get_running_loop().run_in_executor(get_pool(), calc.compute, ind_id, bars, params)
+        except BrokenProcessPool:
+            pool = None   # un proces de calcul a murit: pornim altele
+            fut = asyncio.get_running_loop().run_in_executor(get_pool(), calc.compute, ind_id, bars, params)
+        IND_CACHE[key] = fut
+        # Cache plin: scoatem cele mai vechi intrări (dicționarul păstrează ordinea adăugării).
+        while len(IND_CACHE) > IND_CACHE_SIZE:
+            IND_CACHE.pop(next(iter(IND_CACHE)))
+    try:
+        # shield: dacă pagina care așteaptă se închide, calculul continuă pentru celelalte.
+        result = await asyncio.shield(fut)
+    except BaseException:
+        if fut.done():
+            IND_CACHE.pop(key, None)   # nu păstrăm erorile în cache
+        raise
+    return {**result, "bars": len(bars), "requested": n, "last": bars[-1]["time"]}
+
+
+# Calculează și trimite paginii rezultatul unui indicator (sau eroarea lui).
+async def send_indicator(pair: Pair, conn: Conn, ind_id: str, params: dict):
+    msg = {"type": "indicator", "id": ind_id, "symbol": pair.name, "tf": pair.tf}
+    try:
+        msg["result"] = await compute_indicator(pair, ind_id, params)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 - eroarea apare în pagină
+        where = "analysis.py" if ind_type(ind_id) in ("trend", "sma") else ind_id
+        msg["error"] = f"Eroare în {where}: {type(e).__name__}: {e}"
+    # Pagina poate să fi detașat indicatorul între timp.
+    if conn.indicators.get(ind_id) == params:
+        conn.send(msg)
 
 
 # ---------- Export CSV ----------
@@ -689,6 +938,7 @@ async def trendlines(t: TrendBarsIn):
 EXPORTS: dict[str, dict] = {}
 
 
+# Datele trimise de fereastra de export.
 class ExportIn(BaseModel):
     symbol: str
     tf: int          # secunde; 0 = ticuri brute (bid / ask)
@@ -736,6 +986,7 @@ async def start_export(e: ExportIn):
     # Ex.: exporturi_csv/EURUSD/EURUSD_M1_2025-10-15_2026-10-15.csv
     safe = re.sub(r"[^\w.-]", "_", name)
     path = EXPORT_DIR / safe / f"{safe}_{TF_LABELS[e.tf]}_{e.start}_{e.end}.csv"
+    # Starea exportului: run_export o actualizează pe măsură ce lucrează, pagina o citește.
     job = {"id": uuid.uuid4().hex[:12], "status": "running", "progress": 0.0, "rows": 0,
            "file": path.relative_to(ROOT).as_posix(), "name": path.name, "error": ""}
     EXPORTS[job["id"]] = job
@@ -785,10 +1036,12 @@ async def run_export(job: dict, path: Path, name: str, tf: int, start: int, end:
             last = [None, None]   # ultimele bid / ask, păstrate de la o bucată la alta (ticuri)
             t = start
             while t < end:
-                to = min(t + step, end)
+                to = min(t + step, end)   # bucata curentă: [t, to)
                 if tf in PERIODS:
+                    # M1 și peste: lumânările gata calculate de sursă.
                     rows = bar_rows(await feed.bars_range(name, tf, t, to))
                 else:
+                    # Ticuri sau lumânări sub un minut: pornim de la ticurile bid ale bucății.
                     bid = await feed.ticks(name, "BID", t, to - 1, max_pages=100_000)
                     bid = [x for x in bid if t <= x[0] < to]
                     if tf == 0:
@@ -797,6 +1050,7 @@ async def run_export(job: dict, path: Path, name: str, tf: int, start: int, end:
                         rows = await asyncio.to_thread(tick_rows, bid, ask, last, price)
                     else:
                         rows = bar_rows(await asyncio.to_thread(candles_from_ticks, bid, tf, None))
+                # Scrierea pe disc într-un fir separat, ca serverul să nu se blocheze.
                 await asyncio.to_thread(w.writerows, rows)
                 job["rows"] += len(rows)
                 t = to
@@ -831,111 +1085,176 @@ def tick_rows(bid: list[tuple[int, float]], ask: list[tuple[int, float]], last: 
     return out
 
 
-# ---------- Datastore local ----------
-# De fiecare dată când o pagină deschide un simbol / timeframe (M1 și peste), lumânările primite
-# pentru chart se salvează și pe disc. Structura folderelor spune ce conține fiecare fișier:
-#
-#   datastore/
-#     ctrader/                     <- sursa prețurilor (cTrader și MT5 au prețuri / ore diferite)
-#       EURUSD/                    <- simbolul
-#         D1/                      <- timeframe-ul
-#           EURUSD_D1.csv          <- lumânările: time_utc,open,high,low,close,volume (UTC)
-#           info.json              <- descrierea fișierului: perioada, numărul de lumânări etc.
-#
-# Prima deschidere creează fișierul cu istoricul trimis chartului (cel puțin un an, cel mult
-# 10.000 de lumânări). La următoarele se adaugă doar lumânările noi, până la zi; dacă între
-# ultima lumânare salvată și istoricul chartului e o pauză, o cerem separat de la sursă.
-# Se salvează doar lumânările închise: cea în curs se schimbă la fiecare tic.
-# Sub un minut (1s–30s) nu salvăm: lumânările se construiesc din ticuri și acoperă doar câteva minute.
-STORE_LOCKS: dict[tuple[str, int], asyncio.Lock] = {}
-STORE_TASKS: set[asyncio.Task] = set()   # referințe la salvările în curs (altfel pot fi oprite)
-CSV_HEADER = ["time_utc", "open", "high", "low", "close", "volume"]
+# ---------- Trend multi-timeframe ----------
+# Indicatorul nu folosește lumânările chartului și nici prețurile live: citește doar datastore-ul D1
+# al simbolului (datastore/<sursă>/<SIMBOL>/D1/), pe orice timeframe al chartului. Pentru fiecare
+# sursă / simbol cu indicatorul atașat într-o pagină există un MtfWatch, care:
+#   - aduce datastore-ul D1 la zi după regulile din datastore.py (îl creează dacă nu există, îl
+#     actualizează dacă e învechit) și rulează analysis.py pe zilele anului curent: la atașare, la
+#     schimbarea simbolului (pagina se reconectează) și la închiderea fiecărei zile. Procentele se
+#     recalculează doar după o actualizare, nu la fiecare tic;
+#   - face asta o singură dată odată, oricâte pagini ar avea indicatorul pe același simbol.
+D1 = 86400
+# Aceleași zile + același analysis.py = același rezultat.
+MTF_CACHE: dict[tuple, asyncio.Future] = {}
 
 
-def store_path(name: str, tf: int) -> Path:
-    safe = re.sub(r"[^\w.-]", "_", name)
-    label = TF_LABELS[tf]
-    return DATASTORE_DIR / PRICE_SOURCE / safe / label / f"{safe}_{label}.csv"
-
-
-# Momentul (secunde UTC) ultimei lumânări din fișier, citind doar sfârșitul lui.
-def last_stored_time(path: Path) -> int | None:
-    with path.open("rb") as f:
-        f.seek(0, os.SEEK_END)
-        f.seek(max(0, f.tell() - 4096))
-        lines = f.read().decode("utf-8").strip().splitlines()
-    if not lines or lines[-1].startswith("time_utc"):
-        return None
-    text = lines[-1].split(",", 1)[0]
-    return int(datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
-
-
-def write_store_info(path: Path, name: str, tf: int, digits: int, added: int):
-    info_path = path.with_name("info.json")
+# Rulează run_mtf (indicators.py) în procesul separat, cu cache (la fel ca compute_indicator).
+# key = (sursă, simbol, nr. lumânări, ultima lumânare, nr. zile); i se adaugă data lui analysis.py.
+async def mtf_compute(key: tuple, rows: list[list]) -> dict:
+    global pool
     try:
-        old = json.loads(info_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        old = {}
-    with path.open(encoding="utf-8") as f:
-        rows = sum(1 for _ in f) - 1
-        f.seek(0)
-        next(f, None)
-        first = (next(f, "") or "").split(",", 1)[0]
-    info = {
-        "source": PRICE_SOURCE, "symbol": name, "timeframe": TF_LABELS[tf], "seconds": tf,
-        "digits": digits, "columns": CSV_HEADER, "timezone": "UTC",
-        "first_bar": first, "last_bar": utc_text(last_stored_time(path) * 1000) if rows else "",
-        "bars": rows, "created": old.get("created") or utc_text(int(time.time() * 1000)),
-        "updated": utc_text(int(time.time() * 1000)), "last_added": added,
-    }
-    tmp = info_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(info_path)
-
-
-async def save_to_store(name: str, tf: int, bars: list[dict], digits: int):
-    if tf not in PERIODS:
-        return
-    path = store_path(name, tf)
-    rel = path.parent.relative_to(ROOT).as_posix()
-    lock = STORE_LOCKS.setdefault((name, tf), asyncio.Lock())
-    async with lock:
+        key = (*key, calc.ANALYSIS.stat().st_mtime_ns)
+    except OSError:
+        pass
+    fut = MTF_CACHE.get(key)
+    if fut is None:
+        loop = asyncio.get_running_loop()
         try:
-            now = time.time()
-            closed = [b for b in bars if b["time"] + tf <= now]
-            if path.exists():
-                last = await asyncio.to_thread(last_stored_time, path)
-                if last is not None:
-                    # Pauză între fișier și istoricul chartului: cerem lumânările lipsă de la sursă.
-                    first = closed[0]["time"] if closed else int(now)
-                    if first > last + tf:
-                        gap = await feed.bars_range(name, tf, (last + tf) * 1000, first * 1000)
-                        closed = gap + closed
-                    closed = [b for b in closed if b["time"] > last and b["time"] + tf <= now]
-                rows = bars_to_rows(closed, digits)
-                if rows:
-                    def append():
-                        with path.open("a", newline="", encoding="utf-8") as f:
-                            csv.writer(f).writerows(rows)
-                    await asyncio.to_thread(append)
-            else:
-                rows = bars_to_rows(closed, digits)
-                if not rows:
-                    return
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".tmp")
+            fut = loop.run_in_executor(get_pool(), calc.run_mtf, rows)
+        except BrokenProcessPool:
+            pool = None
+            fut = loop.run_in_executor(get_pool(), calc.run_mtf, rows)
+        MTF_CACHE[key] = fut
+        while len(MTF_CACHE) > IND_CACHE_SIZE:
+            MTF_CACHE.pop(next(iter(MTF_CACHE)))
+    try:
+        return await asyncio.shield(fut)
+    except BaseException:
+        if fut.done():
+            MTF_CACHE.pop(key, None)
+        raise
 
-                def create():
-                    with tmp.open("w", newline="", encoding="utf-8") as f:
-                        w = csv.writer(f)
-                        w.writerow(CSV_HEADER)
-                        w.writerows(rows)
-                    tmp.replace(path)
-                await asyncio.to_thread(create)
-            await asyncio.to_thread(write_store_info, path, name, tf, digits, len(rows))
-            print(f"[DATASTORE] {rel}: +{len(rows)} lumânări")
-        except Exception as e:  # noqa: BLE001 - salvarea nu trebuie să afecteze chartul
-            print(f"[DATASTORE] {rel}: eroare: {type(e).__name__}: {e}")
+
+class MtfWatch:
+    """Indicatorul „Trend multi-timeframe” pentru o sursă / simbol, cu paginile care îl afișează."""
+
+    def __init__(self, feed, source: str, name: str):
+        self.feed, self.source, self.name = feed, source, name
+        self.store = STORE.get(source, name, D1)   # același obiect ca al chartului pe D1
+        self.conns: set[Conn] = set()
+        self.lock = asyncio.Lock()
+        self.keeper: asyncio.Task | None = None
+        self.last: dict | None = None   # ultimul mesaj trimis paginilor
+        self.at = 0.0                   # când (time.monotonic) s-a făcut ultima actualizare
+        self.last_bar: int | None = None   # ora ultimei lumânări D1 din datastore
+
+    # Trimite un mesaj tuturor paginilor care afișează indicatorul pe acest simbol.
+    def broadcast(self, msg: dict):
+        for c in list(self.conns):
+            c.send(msg)
+
+    # Pasul curent al actualizării (1 = caut fișierul, 2 = sincronizez, 3 = rulez analysis.py),
+    # afișat în caseta indicatorului cât timp lucrăm.
+    def progress(self, step: int, text: str):
+        self.broadcast({"type": "indicator", "id": "mtf", "symbol": self.name,
+                        "progress": {"step": step, "text": text}})
+
+    # Progresul sincronizării datastore-ului, ca text pentru pagină.
+    def store_progress(self, st: dict):
+        if st.get("state") != "syncing":
+            return
+        what = {"download": "descarc lumânările D1 (prima dată)", "rebuild": "refac fișierul D1",
+                "history": "completez istoricul D1", "update": "adaug zilele lipsă"}.get(st.get("phase"), "actualizez")
+        self.progress(2, f"{what}: {st.get('progress', 0) * 100:.0f}% · {st.get('bars', 0)} zile")
+
+    # Aduce datastore-ul D1 la zi și rulează analysis.py. O actualizare cerută în timp ce alta
+    # rulează o așteaptă și primește același rezultat (dacă e mai nou de 10 s). Întoarce
+    # (mesaj, nou). Nu se oprește dacă pagina care a cerut-o se închide (descărcarea rămâne utilă).
+    async def refresh(self, force: bool = False) -> tuple[dict, bool]:
+        task = asyncio.create_task(self._refresh(force))
+        STORE_TASKS.add(task)
+        task.add_done_callback(STORE_TASKS.discard)
+        return await asyncio.shield(task)
+
+    # Actualizarea propriu-zisă (sub lacăt, deci una singură odată).
+    async def _refresh(self, force: bool) -> tuple[dict, bool]:
+        async with self.lock:
+            # Avem un rezultat de acum mai puțin de 10 s: îl refolosim.
+            if not force and self.last is not None and time.monotonic() - self.at < 10:
+                return self.last, False
+            msg = {"type": "indicator", "id": "mtf", "symbol": self.name}
+            store = self.store
+            rel = store.path.relative_to(ROOT).as_posix()
+            try:
+                digits = (await self.feed.info(self.name))["digits"]
+                self.progress(1, f"caut {rel}")
+                existed = await asyncio.to_thread(store.path.exists)
+                self.progress(2, "verific ultimele zile și adaug ce lipsește…" if existed
+                              else "nu există: îl creez (ultimele 10.000 de zile închise)…")
+                await store.sync(self.feed, digits, self.store_progress)
+                added = store._added   # zile adăugate la această sincronizare
+                bars = await store.load_bars()
+                # Fără o pagină cu chartul D1 deschis, nu ținem lumânările în memorie.
+                if (self.source, self.name, D1) not in PAIRS:
+                    await store.unload()
+                if not bars:
+                    raise ValueError("datastore-ul D1 e gol")
+                self.last_bar = bars[-1]["time"]
+                # Anul ultimei zile salvate și zilele lui, în forma citită de analysis.py.
+                year = mtf.day_of(self.feed, self.last_bar).year
+                rows = mtf.year_rows(self.feed, bars, year)
+                if not rows:
+                    raise ValueError(f"nicio zi închisă în {year} în datastore")
+                self.progress(3, "rulez analysis.py (neschimbat, doar sursa datelor din read_csv)…")
+                result = await mtf_compute((self.source, self.name, len(bars), self.last_bar, len(rows)), rows)
+                # Rezultatul + detaliile despre baza de date, afișate în casetele indicatorului.
+                msg["result"] = {**result, "digits": digits, "source": SOURCES.get(self.source, self.source),
+                                 "file": rel, "updated": int(time.time() * 1000),
+                                 "db": {"created": not existed, "added": added,
+                                        "total": len(bars), "days": len(rows),
+                                        "first": rows[0][0][:10], "last": rows[-1][0][:10],
+                                        "first_bar": store.meta.get("first_bar", ""),
+                                        "complete": bool(store.meta.get("history_complete"))}}
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - eroarea apare în pagină
+                msg["error"] = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                print(f"[MTF] {self.source}/{self.name}: {msg['error']}")
+            self.last, self.at = msg, time.monotonic()
+            self.broadcast(msg)
+            return msg, True
+
+    # Se trezește la închiderea fiecărei zile (după grila lumânărilor D1 salvate) + CLOSE_DELAY, ca
+    # Pair.keep; cel mult o oră între verificări (ziua se mută cu o oră la ora de vară / iarnă).
+    async def keep(self):
+        while True:
+            last, now = self.last_bar, time.time()
+            wake = now + 3600 if last is None else last + (int((now - last) // D1) + 1) * D1
+            await asyncio.sleep(max(1.0, min(wake, now + 3600) - now + CLOSE_DELAY))
+            await self.refresh(force=True)
+
+
+# Indicatorii „Trend multi-timeframe” activi: (sursă, simbol) -> MtfWatch.
+MTF: dict[tuple[str, str], MtfWatch] = {}
+
+
+# O pagină atașează indicatorul: creăm (sau refolosim) MtfWatch-ul simbolului, pornim
+# actualizarea zilnică și trimitem paginii rezultatul curent.
+async def mtf_watch(feed, source: str, name: str, conn: Conn):
+    w = MTF.get((source, name))
+    if w is None:
+        w = MTF[(source, name)] = MtfWatch(feed, source, name)
+    w.feed = feed
+    w.conns.add(conn)
+    if w.keeper is None or w.keeper.done():
+        w.keeper = asyncio.create_task(w.keep())
+    msg, fresh = await w.refresh()
+    # Un rezultat nou a fost deja trimis tuturor (broadcast); unul refolosit îl trimitem doar ei.
+    if not fresh and conn in w.conns:
+        conn.send(msg)
+
+
+# Pagina a detașat indicatorul (sau s-a închis); ultima pagină oprește actualizarea zilnică.
+def mtf_unwatch(source: str, name: str, conn: Conn):
+    w = MTF.get((source, name))
+    if w is None:
+        return
+    w.conns.discard(conn)
+    if not w.conns:
+        del MTF[(source, name)]
+        if w.keeper:
+            w.keeper.cancel()
 
 
 # Conexiunea WebSocket a unei pagini. Adresa e de forma /ws?symbol=EURUSD&tf=1
@@ -948,55 +1267,162 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
 
     # Trimite o eroare paginii și închide. retry=True: pagina reîncearcă singură mai târziu
     # (ex. sursa de prețuri temporar indisponibilă); fără retry: eroare definitivă (simbol inexistent).
-    async def fail(msg: str, retry: bool):
-        await ws.send_text(json.dumps({"type": "error", "msg": msg, "retry": retry}))
-        await ws.close()
+    # `extra` = câmpuri în plus pentru pagină (ex. code="unknown_symbol").
+    async def fail(msg: str, retry: bool, **extra):
+        try:
+            await ws.send_text(json.dumps({"type": "error", "msg": msg, "retry": retry, **extra}))
+            await ws.close()
+        except (WebSocketDisconnect, RuntimeError):
+            pass   # pagina s-a închis între timp
 
+    # Sursa activă la conectare; dacă se schimbă între timp, pagina se reconectează (mesajul "source").
+    src, source = feed, PRICE_SOURCE
     try:
-        await asyncio.wait_for(feed.ready.wait(), 10)
+        await asyncio.wait_for(src.ready.wait(), 10)
     except asyncio.TimeoutError:
-        await fail(f"{SOURCE_NAME} indisponibil", retry=True)
+        await fail(f"{SOURCES[source]} indisponibil", retry=True)
         return
-    name = feed.resolve(symbol)
+    name = src.resolve(symbol)
     if name is None:
-        await fail(f"Simbol necunoscut: {symbol}", retry=False)
+        # Simbolul nu există la această sursă (ex. după schimbarea sursei): pagina anunță
+        # utilizatorul și deschide meniul de simboluri.
+        await fail(f"{symbol} nu există la {SOURCES[source]}", retry=False,
+                   code="unknown_symbol", symbol=symbol, source=SOURCES[source])
         return
 
     # Ne abonăm la ticurile simbolului ÎNAINTE de a cere istoricul, ca să nu pierdem ticurile
-    # sosite între timp; primim o coadă proprie.
+    # sosite între timp; primim o coadă proprie. `conn` primește mesajele perechii (progresul
+    # datastore-ului, rezultatele indicatorilor).
     q = hub.subscribe(name)
-    try:
+    conn = Conn()
+    pair: Pair | None = None
+    jobs: set[asyncio.Task] = set()   # calculele de indicatori cerute de pagină
+    receiver = getter = ctrl_getter = None
+
+    # Mesajele paginii: {"type": "indicator", "id": "trend" (sau o copie, „sma#2”), "params": {...}} = calculează și
+    # trimite rezultatul (și din nou la fiecare lumânare închisă); {"type": "indicator_off", "id"}.
+    def on_client(text: str):
         try:
-            hello = await build_hello(name, tf)
-        except (CTraderError, ConnectionError, asyncio.TimeoutError) as e:
-            print(f"[WEB] istoric {name}: {e}")
-            await fail(f"{SOURCE_NAME} indisponibil", retry=True)
+            data = json.loads(text)
+        except ValueError:
             return
+        if not isinstance(data, dict):
+            return
+        ind_id = data.get("id")
+        if not isinstance(ind_id, str) or len(ind_id) > 40:
+            return
+        if data.get("type") == "indicator_off":
+            conn.indicators.pop(ind_id, None)
+            if ind_id == "mtf":
+                mtf_unwatch(source, name, conn)
+        elif data.get("type") == "indicator" and ind_id == "mtf":
+            # Pe orice timeframe: indicatorul citește baza de date D1, nu datastore-ul chartului.
+            job = asyncio.create_task(mtf_watch(src, source, name, conn))
+            jobs.add(job)
+            job.add_done_callback(jobs.discard)
+        elif data.get("type") == "indicator" and ind_type(ind_id) in calc.SPECS:
+            params = data.get("params") if isinstance(data.get("params"), dict) else {}
+            if pair is None:
+                conn.send({"type": "indicator", "id": ind_id, "symbol": name, "tf": tf,
+                           "error": "Indicatorii nu rulează pe 1s–30s (aceste lumânări nu se salvează "
+                                    "în datastore). Alege M1 sau un timeframe mai mare."})
+                return
+            conn.indicators[ind_id] = params
+            job = asyncio.create_task(send_indicator(pair, conn, ind_id, params))
+            jobs.add(job)
+            job.add_done_callback(jobs.discard)
+
+    try:
+        # Detectează închiderea paginii (și primește mesajele ei).
+        receiver = asyncio.create_task(ws.receive_text())
+        started = time.monotonic()
+        if tf in PERIODS:
+            # Datastore-ul perechii se aduce la zi înainte de hello: chartul primește lumânările
+            # închise din el. Între timp pagina primește progresul (mesajele "store").
+            try:
+                info = await asyncio.wait_for(src.info(name), HELLO_TIMEOUT)
+            except Exception as e:  # noqa: BLE001
+                print(f"[WEB] {SOURCES[source]} {name}: {str(e) or type(e).__name__}")
+                await fail(f"{SOURCES[source]} indisponibil", retry=True)
+                return
+            pair = join_pair(src, source, name, tf, conn, info["digits"])
+            if pair.store.status.get("state") == "syncing":
+                conn.send({"type": "store", "symbol": name, "tf": tf, **pair.store.status})
+            sync = asyncio.ensure_future(pair.sync())
+            # Cât durează sincronizarea: trimitem paginii progresul și citim mesajele ei.
+            while not sync.done():
+                ctrl_getter = asyncio.create_task(conn.ctrl.get())
+                done, _ = await asyncio.wait({sync, ctrl_getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+                if ctrl_getter in done:
+                    await ws.send_text(ctrl_getter.result())
+                else:
+                    ctrl_getter.cancel()
+                if receiver in done:
+                    on_client(receiver.result())   # ridică WebSocketDisconnect dacă s-a închis
+                    receiver = asyncio.create_task(ws.receive_text())
+            try:
+                sync.result()
+            except Exception as e:  # noqa: BLE001 - orice eroare ajunge ca mesaj în pagină
+                reason = str(e) or type(e).__name__
+                print(f"[DATASTORE] {pair.label}: {reason}")
+                while not conn.ctrl.empty():
+                    await ws.send_text(conn.ctrl.get_nowait())
+                await fail(f"datastore {TF_LABELS[tf]}: {reason}", retry=True)
+                return
+        try:
+            # Limită de timp: dacă sursa nu răspunde, pagina primește o eroare și reîncearcă,
+            # în loc să aștepte la nesfârșit.
+            hello = await asyncio.wait_for(build_hello(src, name, tf, pair), HELLO_TIMEOUT)
+        except Exception as e:  # noqa: BLE001 - orice eroare a sursei ajunge ca mesaj în pagină
+            reason = str(e) or type(e).__name__
+            if isinstance(e, asyncio.TimeoutError):
+                reason = f"fără răspuns în {HELLO_TIMEOUT}s"
+            print(f"[WEB] istoric {SOURCES[source]} {name} {TF_LABELS[tf]}: {reason}")
+            await fail(f"{SOURCES[source]} indisponibil", retry=True)
+            return
+        elapsed = time.monotonic() - started
+        if elapsed > 5:
+            print(f"[WEB] istoric {SOURCES[source]} {name} {TF_LABELS[tf]}: încărcat lent ({elapsed:.1f}s)")
+        hello["source"] = source
+        # Starea datastore-ului (pentru indicatorul de pe chart); sub un minut nu se salvează.
+        hello["store"] = dict(pair.store.status) if pair else {"state": "off"}
+        # Mesajele de progres rămase sunt mai vechi decât starea din hello.
+        while not conn.ctrl.empty():
+            conn.ctrl.get_nowait()
         await ws.send_text(json.dumps(hello))
-        # Salvăm lumânările și în datastore, în fundal (chartul nu așteaptă după disc).
-        task = asyncio.create_task(save_to_store(name, tf, hello["bars"], hello["digits"]))
-        STORE_TASKS.add(task)
-        task.add_done_callback(STORE_TASKS.discard)
-        # Pagina nu ne trimite date, dar trebuie să „ascultăm” ca să aflăm când se închide.
-        receiver = asyncio.create_task(ws.receive_text())  # detectează închiderea de către client
+        if pair:
+            pair.start_keeper()
         while True:
-            # Așteptăm, în paralel, fie un mesaj nou în coadă, fie un semnal de la pagină.
+            # Așteptăm, în paralel: ticuri / alarme (q), mesaje ale perechii (conn.ctrl) sau un
+            # mesaj / închiderea paginii (receiver).
             getter = asyncio.create_task(q.get())
-            done, _ = await asyncio.wait({getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
-            if getter in done:
-                # A venit un mesaj (ticuri sau alarmă): îl trimitem paginii.
-                await ws.send_text(getter.result())
-            else:
-                getter.cancel()
+            ctrl_getter = asyncio.create_task(conn.ctrl.get())
+            done, _ = await asyncio.wait({getter, ctrl_getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            # Anulăm imediat (fără await între) cozile care n-au dat nimic: mesajul rămâne în coadă.
+            for t in (getter, ctrl_getter):
+                if t not in done:
+                    t.cancel()
+            for t in (getter, ctrl_getter):
+                if t in done:
+                    await ws.send_text(t.result())
             if receiver in done:
-                receiver.result()  # ridică WebSocketDisconnect dacă s-a închis
+                on_client(receiver.result())   # ridică WebSocketDisconnect dacă s-a închis
                 receiver = asyncio.create_task(ws.receive_text())
     except (WebSocketDisconnect, RuntimeError):
         # Pagina s-a închis sau conexiunea a căzut – situație normală, nu o eroare.
         pass
     finally:
-        # Indiferent cum s-a terminat, eliberăm coada.
+        # Indiferent cum s-a terminat, eliberăm coada și oprim sarcinile de așteptare rămase.
+        # (Fără asta, Python afișează în consolă „Task exception was never retrieved” când
+        #  pagina se închide exact în timp ce îi trimitem un mesaj.)
+        for t in (receiver, getter, ctrl_getter, *jobs):
+            if t is not None:
+                t.cancel()
+                t.add_done_callback(lambda t: t.cancelled() or t.exception())
         hub.unsubscribe(name, q)
+        mtf_unwatch(source, name, conn)
+        if pair:
+            leave_pair(pair, conn)
 
 
 # Punctul de pornire când rulezi `python server.py`.
