@@ -19,7 +19,7 @@
 
   // Opțiunile de timeframe: ticurile brute (bid / ask, valoarea 0) și toate timeframe-urile chartului.
   eTf.add(new Option("Ticuri (bid / ask)", "0"));
-  for (const [tf, label] of TFS) eTf.add(new Option(label, String(tf)));
+  for (const [tf, label] of TFS) if (tf) eTf.add(new Option(label, String(tf)));
 
   // O dată calendaristică <-> textul „AAAA-LL-ZZ” folosit de câmpurile de tip date (ora locală).
   const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;

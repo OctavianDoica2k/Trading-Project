@@ -4,7 +4,4 @@ websockets>=12
 python-dotenv>=1.0
 pywebpush>=2.0
 pandas>=2.0          # pentru analysis.py (indicatorul 📈 Trend)
-# Fusurile orare (MT5_SERVER_TZ); Windows nu are baza lor de date în sistem
-tzdata; sys_platform == "win32"
-# Doar pentru PRICE_SOURCE=mt5 (terminalul MetaTrader 5 există doar pe Windows)
-MetaTrader5>=5.0.45; sys_platform == "win32"
+questdb>=6.0         # baza de date de pe VM (tickdb.py): colectorul scrie, serverul citește

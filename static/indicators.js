@@ -133,9 +133,7 @@ function renderIndicators() {
     : remove ? `Detașează de pe ${state.symbol}`
     : sel.multi && isAttached(sel.id) ? `Adaugă încă una pe ${state.symbol}` : `Atașează pe ${state.symbol}`;
   indAttach.classList.toggle("danger", remove);
-  $("indNote").textContent = state.tf < 60 && !sel?.anyTf
-    ? "Pe 1s–30s indicatorii nu rulează: aceste lumânări nu se salvează în datastore. Alege M1 sau un timeframe mai mare."
-    : sel?.note || "";
+  $("indNote").textContent = sel?.note || "";
 }
 
 // Evenimente de la app.js, transmise indicatorilor atașați.

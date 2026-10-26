@@ -54,6 +54,8 @@
       <button id="indBtn" class="chartbtn" title="Indicatori"><i>ƒx</i> Indicatori</button>
       <!-- Cât din datastore-ul local (simbol + timeframe) e descărcat; bara de progres (datastore.js). -->
       <div id="storeBadge" class="storebadge" hidden><span class="sbtext"></span><div class="progress" hidden><div></div></div></div>
+      <!-- Recuperarea ticurilor lipsă de către colectorul de pe VM; bara de progres (sync.js). -->
+      <div id="syncBadge" class="storebadge" hidden><span class="sbtext"></span><div class="progress" hidden><div></div></div></div>
     </div>
     <!-- Aici apar, în dreapta sus, controalele indicatorilor atașați (ex. sliderul Trend). -->
     <div id="indWidgets" class="indwidgets"></div>
@@ -190,6 +192,7 @@
 <script src="/static/push.js"></script>
 <script src="/static/export.js"></script>
 <script src="/static/datastore.js"></script>
+<script src="/static/sync.js"></script>
 <script src="/static/indicators.js"></script>
 <script src="/static/trend.js"></script>
 <script src="/static/sma.js"></script>

@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["server.py"],
       "port": 8000
+    },
+    {
+      "name": "nexus-test-8001",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set PORT=8001&& python server.py"],
+      "port": 8001
     }
   ]
 }

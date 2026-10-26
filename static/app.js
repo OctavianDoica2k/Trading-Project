@@ -10,15 +10,20 @@
 //    De la M1 în sus, înainte de hello vine progresul datastore-ului local („store”, afișat de
 //    datastore.js), iar indicatorii primesc rezultatele calculate pe server („indicator”).
 //  - Gestionează listele de timeframe și de tip de afișare (lumânări, Heikin-Ashi, linie...).
+//  - Timeframe-ul „Ticuri” (tf = 0): chartul de sus arată fiecare tic ca o lumânare (bid), plus
+//    linia ask. Lumânarea unui tic merge de la bid-ul ticului anterior (open) la bid-ul lui (close),
+//    deci corpul arată mișcarea adusă de acel tic. Lightweight-charts lucrează doar cu secunde
+//    întregi, deci fiecare tic primește un „timp” fals = numărul lui de ordine (TICK_BASE + i),
+//    iar ora reală, cu milisecunde, se ia din tickMs la afișare (axa de timp, crosshair).
 //
 //  Fișierele alerts.js și push.js se încarcă DUPĂ acesta și folosesc direct variabilele
 //  definite aici (state, chart, series, $, css, store, selectSymbol). Meniul de simboluri
 //  e în symbols.js (loadSymbols, apelată aici la schimbarea sursei de prețuri).
 // =====================================================================================
 
-// Timeframe-urile disponibile: [durata unei lumânări în secunde, eticheta butonului].
+// Timeframe-urile disponibile: [durata unei lumânări în secunde, eticheta butonului]. 0 = ticuri.
 const TFS = [
-  [1, "1s"], [5, "5s"], [15, "15s"], [30, "30s"],
+  [0, "Ticuri"], [1, "1s"], [5, "5s"], [15, "15s"], [30, "30s"],
   [60, "M1"], [300, "M5"], [900, "M15"], [1800, "M30"], [3600, "H1"], [14400, "H4"], [86400, "D1"],
   [604800, "W1"],
 ];
@@ -69,10 +74,34 @@ let state = {
 // Completează cu zerouri în față: pad(7) => "07", pad(5, 3) => "005".
 const pad = (n, w = 2) => String(n).padStart(w, "0");
 
+// ---------- Timeframe-ul „Ticuri” ----------
+// Pe „Ticuri”, „timpul” unui punct de pe chart e numărul de ordine al ticului (de la TICK_BASE);
+// tickMs dă ora lui reală (ms UTC), msTick invers. Ticurile mai vechi (la derulare) primesc numere
+// mai mici. Serverul (indicatorii) folosește ora reală; msTick o traduce în poziția de pe chart.
+const TICK_BASE = 1_000_000_000;
+const tickMs = new Map();
+const msTick = new Map();
+const setTick = (t, ms) => { tickMs.set(t, ms); msTick.set(ms, t); };
+let askData = [];          // linia ask: [{time, value}], aceleași numere de ordine ca rawBars
+let askSeries = null;
+const tickMode = () => state.tf === 0;
+// Tipul de afișare (lumânări, Heikin-Ashi, bare, linie, arie), același și pe „Ticuri”.
+const chartType = () => state.chartType;
+// Lumânarea unui tic: de la bid-ul anterior (prev) la bid-ul lui; primul tic, fără anterior, e o liniuță.
+const tickBar = (t, prev, bid) => ({
+  time: t, open: prev ?? bid, high: Math.max(prev ?? bid, bid), low: Math.min(prev ?? bid, bid), close: bid,
+});
+
 // Timpii vin de la server în UTC; îi afișăm în ora locală a dispozitivului.
 // Pentru chartul de lumânări, `t` e în secunde (cum îl folosește lightweight-charts).
 const MONTHS = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oct", "nov", "dec"];
 function fmtBarTime(t) {
+  if (tickMode()) {
+    const ms = tickMs.get(t);
+    if (ms === undefined) return "";
+    const d = new Date(ms);
+    return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${fmtTime(ms)}`;
+  }
   const d = new Date(t * 1000);
   return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
@@ -80,6 +109,10 @@ function fmtBarTime(t) {
 // Etichetele de pe axa de timp. `type` spune ce fel de reper e (vezi TickMarkType în
 // documentația lightweight-charts): 0 = an, 1 = lună, 2 = zi, 3 = oră, 4 = oră cu secunde.
 function fmtTickMark(t, type) {
+  if (tickMode()) {
+    const ms = tickMs.get(t);
+    return ms === undefined ? "" : fmtTime(ms);
+  }
   const d = new Date(t * 1000);
   switch (type) {
     case 0: return String(d.getFullYear());
@@ -144,12 +177,13 @@ let haGen = 0, haBusy = false, haAgain = false, haFailed = false, haTimer = null
 
 // O lumânare în forma cerută de seria overlay: întreagă pentru bare OHLC, doar închiderea
 // (time + value) pentru linie și arie.
-const overlayPoint = (b) => (state.chartType === "bars" ? { ...b } : { time: b.time, value: b.close });
+const overlayPoint = (b) => (chartType() === "bars" ? { ...b } : { time: b.time, value: b.close });
 
 // Redesenează toate lumânările după tipul de afișare curent.
 function showBars() {
-  series.setData(state.chartType === "heikin" && haBars ? haBars : rawBars);
+  series.setData(chartType() === "heikin" && haBars ? haBars : rawBars);
   overlay?.setData(rawBars.map(overlayPoint));
+  askSeries?.setData(askData);
 }
 
 // Cere serverului lumânările Heikin-Ashi pentru lumânările date.
@@ -172,7 +206,7 @@ const HA_TAIL = 64;
 // Calculează (pe server) Heikin-Ashi și desenează rezultatul. Prima dată pe tot istoricul de pe
 // chart; apoi doar pe ultimele HA_TAIL lumânări, din care înlocuim lumânările noi / în curs.
 async function refreshHeikin() {
-  if (state.chartType !== "heikin" || !rawBars.length || haFailed) return;
+  if (chartType() !== "heikin" || !rawBars.length || haFailed) return;
   if (haBusy) { haAgain = true; return; }
   haBusy = true;
   const gen = haGen;   // dacă haGen se schimbă cât așteptăm, răspunsul e pentru date vechi
@@ -210,7 +244,14 @@ function scheduleHeikin() {
 // Aplică tipul de afișare ales: culorile lui `series`, seria overlay și datele.
 function applyChartType() {
   if (overlay) { chart.removeSeries(overlay); overlay = null; }
-  const t = state.chartType;
+  if (askSeries) { chart.removeSeries(askSeries); askSeries = null; }
+  // Pe „Ticuri”, linia ask se desenează peste lumânările bid.
+  if (tickMode()) {
+    askSeries = chart.addLineSeries({
+      color: css("--ask"), lineWidth: 1, lastValueVisible: false, priceLineVisible: false,
+    });
+  }
+  const t = chartType();
   // La bare / linie / arie, lumânările din `series` devin transparente (le desenează overlay-ul).
   const hidden = t === "bars" || t === "line" || t === "area";
   const up = hidden ? "rgba(0,0,0,0)" : css("--up"), down = hidden ? "rgba(0,0,0,0)" : css("--down");
@@ -235,13 +276,28 @@ function applyChartType() {
 function drawLastBar(isNew) {
   const b = { ...state.lastBar };
   if (isNew) rawBars.push(b); else rawBars[rawBars.length - 1] = b;
-  if (state.chartType === "heikin" && haBars) scheduleHeikin();
+  if (chartType() === "heikin" && haBars) scheduleHeikin();
   else series.update({ ...b });
   overlay?.update(overlayPoint(b));
 }
 
+// Pe „Ticuri”: fiecare tic e o lumânare nouă (bid), iar ask-ul un punct nou pe linia galbenă.
+function onTickPoint(msc, bid, ask) {
+  const prev = rawBars[rawBars.length - 1];
+  const t = prev ? prev.time + 1 : TICK_BASE;
+  setTick(t, msc);
+  state.lastBar = tickBar(t, prev?.close, bid);
+  drawLastBar(true);
+  // Indicatorii își prelungesc liniile până la noua lumânare (vezi indicators.js).
+  if (prev) window.onNewBar?.();
+  const a = { time: t, value: ask };
+  askData.push(a);
+  askSeries?.update(a);
+}
+
 // Actualizează lumânarea curentă cu un tic nou (doar bid-ul contează pentru lumânări).
 function onTick(msc, bid, ask) {
+  if (tickMode()) { onTickPoint(msc, bid, ask); return; }
   // Începutul intervalului din care face parte ticul. Ex. tf=60 (M1): ticul de la 10:00:37
   // aparține lumânării care începe la 10:00:00. Numărăm intervalele de la ultima lumânare
   // primită de la server, ca să respectăm alinierea ei (ex. D1 care începe la ora brokerului).
@@ -266,6 +322,25 @@ function onTick(msc, bid, ask) {
   }
   // Redesenăm doar ultima lumânare (rapid).
   drawLastBar(false);
+}
+
+// Pe „Ticuri”, serverul trimite rezultatele indicatorilor cu ora reală a ticurilor (ms); le
+// trecem pe pozițiile de pe chart (msTick). Punctele / liniile cu ticuri care nu sunt pe chart
+// (mai vechi decât ce s-a încărcat) se lasă deoparte.
+function tickTimes(msg) {
+  const r = msg.result;
+  if (!r) return msg;
+  const out = { ...r };
+  if (r.points) {
+    out.points = r.points.filter((p) => msTick.has(p.time)).map((p) => ({ ...p, time: msTick.get(p.time) }));
+  }
+  const pt = (p) => ({ ...p, time: msTick.get(p.time) });
+  const line = (l) => ({ ...l, from: pt(l.from), via: pt(l.via), to: pt(l.to) });
+  const known = (l) => [l.from, l.via, l.to].every((p) => msTick.has(p.time));
+  if (r.max) out.max = r.max.filter(known).map(line);
+  if (r.min) out.min = r.min.filter(known).map(line);
+  if (r.last !== undefined && msTick.has(r.last)) out.last = msTick.get(r.last);
+  return { ...msg, result: out };
 }
 
 // ---------- Panou de cotații ----------
@@ -419,7 +494,7 @@ function connect() {
   state.loaded = false;
   setStatus(false, "conectare...");
   // Indicatorul datastore-ului de pe chart: „se verifică” până la primul mesaj (datastore.js).
-  window.onStoreStatus?.(state.tf >= 60 ? { state: "pending" } : { state: "off" });
+  window.onStoreStatus?.({ state: "pending" });
   // Plasă de siguranță: dacă istoricul nu vine în 40 s (serverul are propria limită de 30 s),
   // închidem conexiunea; onclose de mai jos reîncearcă, deci pagina nu rămâne în „conectare...”.
   // Fiecare mesaj de progres al datastore-ului repornește termenul (o descărcare mare durează).
@@ -454,11 +529,22 @@ function connect() {
       // Istoric nou: istoricul mai vechi se încarcă din nou, de la zero, la derulare.
       // (Înainte de setData, care poate cere imediat lumânări mai vechi.)
       older = { loading: false, done: false, retryAt: 0 };
-      rawBars = msg.bars.map((b) => ({ ...b }));
+      tickMs.clear(); msTick.clear();
+      askData = [];
+      if (tickMode()) {
+        // „Ticuri”: fiecare tic devine o lumânare (bid), cu numărul de ordine drept „timp”.
+        rawBars = msg.ticks.map(([ms, bid, ask], i) => {
+          setTick(TICK_BASE + i, ms);
+          askData.push({ time: TICK_BASE + i, value: ask });
+          return tickBar(TICK_BASE + i, i ? msg.ticks[i - 1][1] : undefined, bid);
+        });
+      } else {
+        rawBars = msg.bars.map((b) => ({ ...b }));
+      }
       haBars = null; haGen++; haFailed = false;
       showBars();
       refreshHeikin();
-      state.lastBar = msg.bars.length ? { ...msg.bars[msg.bars.length - 1] } : null;
+      state.lastBar = rawBars.length ? { ...rawBars[rawBars.length - 1] } : null;
       // Sărim direct la prezent (rightOffset lumânări libere în dreapta). Fără animație: scrollToRealTime
       // animează ~1 s, iar liniile indicatorilor sosite între timp ar opri derularea la jumătate.
       chart.timeScale().scrollToPosition(chart.timeScale().options().rightOffset, false);
@@ -472,6 +558,8 @@ function connect() {
       state.loaded = true;
       // Starea datastore-ului pentru perechea deschisă (datastore.js).
       window.onStoreStatus?.(msg.store);
+      // Recuperarea ticurilor lipsă de pe VM (sync.js).
+      window.onSyncStatus?.(msg.sync);
       // Anunțăm alerts.js că s-a încărcat un simbol (dacă a definit funcția; `?.` = doar dacă există).
       window.onSymbolLoaded?.();
       // Indicatorii atașați își cer din nou rezultatele, pentru noul istoric (indicators.js).
@@ -480,9 +568,12 @@ function connect() {
       // Progresul / starea datastore-ului local (descărcare, actualizare la lumânare închisă).
       if (!sock.gotHello) armHelloTimer();
       window.onStoreStatus?.(msg);
+    } else if (msg.type === "sync") {
+      // Progresul recuperării ticurilor lipsă de către colectorul de pe VM (sync.js).
+      window.onSyncStatus?.(msg);
     } else if (msg.type === "indicator") {
       // Rezultatul unui indicator, calculat pe server din datastore (indicators.js).
-      window.onIndicator?.(msg);
+      window.onIndicator?.(tickMode() ? tickTimes(msg) : msg);
     } else if (msg.type === "alert") {
       // O alarmă s-a declanșat sau s-a actualizat: o tratează alerts.js.
       window.onAlertEvent?.(msg.alert);
@@ -548,7 +639,8 @@ async function loadOlder() {
   if (o.loading || o.done || !rawBars.length || Date.now() < o.retryAt) return;
   o.loading = true;
   try {
-    const q = `symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}&before=${rawBars[0].time}`;
+    if (tickMode()) { await loadOlderTicks(o); return; }
+    const q =`symbol=${encodeURIComponent(state.symbol)}&tf=${state.tf}&before=${rawBars[0].time}`;
     const r = await fetch(`/api/bars?${q}`);
     if (!r.ok) throw new Error(r.statusText);
     const { bars } = await r.json();
@@ -561,7 +653,7 @@ async function loadOlder() {
     // departe rezultatul rămâne același, vezi HA_TAIL), înainte de a redesena.
     // (haGen++ anulează și un calcul în curs pentru istoricul de dinainte; reluăm mai jos.)
     let ha = null;
-    if (state.chartType === "heikin") {
+    if (chartType() === "heikin") {
       const gen = ++haGen;
       if (haBars) {
         const part = await fetchHeikin([...add, ...rawBars.slice(0, HA_TAIL)]).catch(() => null);
@@ -574,7 +666,7 @@ async function loadOlder() {
     haBars = ha;
     const range = chart.timeScale().getVisibleLogicalRange();
     showBars();
-    if (state.chartType === "heikin") scheduleHeikin();
+    if (chartType() === "heikin") scheduleHeikin();
     if (range) {
       chart.timeScale().setVisibleLogicalRange({ from: range.from + add.length, to: range.to + add.length });
     }
@@ -584,6 +676,33 @@ async function loadOlder() {
     o.loading = false;
   }
 }
+// „Ticuri”: cere ticurile dinaintea primului de pe chart și le lipește în față, cu numere de
+// ordine mai mici (ora lor reală intră în tickMs).
+async function loadOlderTicks(o) {
+  const first = rawBars[0].time;
+  const q = `symbol=${encodeURIComponent(state.symbol)}&before=${tickMs.get(first)}`;
+  const r = await fetch(`/api/ticks?${q}`);
+  if (!r.ok) throw new Error(r.statusText);
+  const { ticks } = await r.json();
+  if (o !== older) return;
+  if (!ticks.length) { o.done = true; return; }
+  const n = ticks.length;
+  const bars = [], asks = [];
+  ticks.forEach(([ms, bid, ask], i) => {
+    const t = first - n + i;
+    setTick(t, ms);
+    bars.push(tickBar(t, i ? ticks[i - 1][1] : undefined, bid));
+    asks.push({ time: t, value: ask });
+  });
+  // Lumânarea care era prima pe chart pornește acum din ultimul tic adus.
+  rawBars[0] = tickBar(first, ticks[n - 1][1], rawBars[0].close);
+  rawBars = [...bars, ...rawBars];
+  askData = [...asks, ...askData];
+  const range = chart.timeScale().getVisibleLogicalRange();
+  showBars();
+  if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + n, to: range.to + n });
+}
+
 // La fiecare derulare / zoom: dacă se vede una dintre primele 200 de lumânări, cerem mai vechi.
 chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
   if (range && range.from < 200) loadOlder();
@@ -597,7 +716,14 @@ for (const [tf, label] of TFS) tfSel.add(new Option(label, tf));
 if (!TFS.some(([tf]) => tf === state.tf)) state.tf = TFS[0][0];
 tfSel.value = state.tf;
 tfSel.addEventListener("change", () => {
-  state.tf = Number(tfSel.value); store.set("tf", state.tf); connect();
+  const wasTicks = tickMode();
+  state.tf = Number(tfSel.value); store.set("tf", state.tf);
+  // Intrare în / ieșire din „Ticuri”: alt fel de date pe chart (puncte numerotate / lumânări).
+  if (wasTicks !== tickMode()) {
+    rawBars = []; askData = []; tickMs.clear(); msTick.clear(); state.lastBar = null;
+    applyChartType();
+  }
+  connect();
 });
 
 // Lista tipurilor de afișare (lumânări japoneze, Heikin-Ashi, bare, linie, arie).

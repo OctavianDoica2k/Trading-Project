@@ -12,7 +12,7 @@
 //  - Media e desenată ca o linie pe chart, cu valoarea ultimei lumânări închise pe axa de preț.
 //  - În dreapta sus pe chart, fiecare copie are controlul ei: perioada, prețul, ↻ (cere din nou
 //    rezultatul) și ✕ (o scoate de pe chart). Perioada și prețul se păstrează în browser.
-//  - Pe 1s–30s nu rulează (lumânările nu se salvează în datastore).
+//  - Rulează pe orice timeframe, inclusiv pe „Ticuri” (o lumânare pe tic).
 //
 //  Folosește variabilele din app.js (chart, state, $, css, store, sendWS), toast() din
 //  alerts.js și registerIndicator() / detachIndicator() din indicators.js.
@@ -95,24 +95,9 @@ function createSma(id, isNew) {
     lineSeries = null;
   }
 
-  // Pe 1s–30s indicatorul nu rulează: controlul rămâne pe chart, dar arată de ce nu are linie.
-  function setOff(off) {
-    if (!w) return;
-    w.classList.toggle("off", off);
-    w.querySelector(".indrefresh").disabled = off;
-    if (off) {
-      w.classList.remove("busy");
-      w.querySelector(".indcount").textContent = "—";
-      w.title = "Indicatorii nu rulează pe 1s–30s (aceste lumânări nu se salvează în datastore). " +
-        "Alege M1 sau un timeframe mai mare.";
-    }
-  }
-
   // Cere serverului media pentru simbolul / timeframe-ul de acum. Rezultatul vine în onResult.
   function request() {
     if (!w || !state.loaded) return;
-    if (state.tf < 60) { clear(); setOff(true); return; }
-    setOff(false);
     if (sendWS({ type: "indicator", id, params: params() })) {
       w.classList.add("busy");
       w.querySelector(".indcount").textContent = "…";

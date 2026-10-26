@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tick Viewer</title>
+</head>
+<body>
+  <h1 id="pret">Astept tick-uri...</h1>
+
+  <script>
+    const ws = new WebSocket("ws://localhost:8765");
+
+    ws.onmessage = (event) => {
+      document.getElementById("pret").textContent = event.data;
+    };
+
+    ws.onclose = () => {
+      document.getElementById("pret").textContent = "Deconectat";
+    };
+  </script>
+</body>
+</html>

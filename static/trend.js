@@ -14,7 +14,7 @@
 //  - Sliderul arată doar liniile apropiate de prețul curent: la N%, o linie e vizibilă dacă
 //    distanța dintre capătul ei și prețul curent e cel mult N% din intervalul de preț al
 //    lumânărilor analizate (maximul − minimul). 100% = toate. La prima atașare pornește de la 50%.
-//  - Pe 1s–30s nu rulează (lumânările nu se salvează în datastore).
+//  - Rulează pe orice timeframe, inclusiv pe „Ticuri” (o lumânare pe tic).
 //
 //  Folosește variabilele din app.js (chart, series, state, $, css, store, sendWS), toast() din
 //  alerts.js și registerIndicator() din indicators.js.
@@ -144,24 +144,9 @@ function extendTrendLines() {
   if (changed) applyTrendFilter();
 }
 
-// Pe 1s–30s indicatorul nu rulează: controlul rămâne pe chart, dar arată de ce nu are linii.
-function setTrendOff(off) {
-  if (!trendWidget) return;
-  trendWidget.classList.toggle("off", off);
-  trendWidget.querySelector(".indrefresh").disabled = off;
-  if (off) {
-    trendWidget.classList.remove("busy");
-    trendWidget.querySelector(".indcount").textContent = "—";
-    trendWidget.title = "Indicatorii nu rulează pe 1s–30s (aceste lumânări nu se salvează în datastore). " +
-      "Alege M1 sau un timeframe mai mare.";
-  }
-}
-
 // Cere serverului liniile pentru simbolul / timeframe-ul de acum. Rezultatul vine în onResult.
 function requestTrend() {
   if (!trendWidget || !state.loaded) return;
-  if (state.tf < 60) { clearTrendLines(); setTrendOff(true); return; }
-  setTrendOff(false);
   if (sendWS({ type: "indicator", id: "trend", params: { bars: TREND_BARS } })) {
     trendWidget.classList.add("busy");
     trendWidget.querySelector(".indcount").textContent = "…";

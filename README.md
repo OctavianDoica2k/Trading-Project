@@ -3,52 +3,64 @@
 Chart live cu prețuri actualizate la nivel de tic (timestamp la milisecundă), cu alarme de preț
 care trimit e-mail. Merge pe desktop și pe telefon (din browser).
 
-Sursa prețurilor se alege din lista din stânga sus a paginii (**MT5** / **cTrader**), fără repornirea
-serverului. Alegerea e aceeași pentru toate paginile deschise și ține până la repornirea serverului;
-serverul pornește mereu pe sursa din `PRICE_SOURCE` din `.env` (implicit `ctrader`):
-- `ctrader`: **cTrader Open API**, prin internet. Nu are nevoie de niciun program de trading deschis.
-- `mt5`: terminalul **MetaTrader 5** (ex. FBS), care trebuie să fie pornit și logat pe PC (doar Windows).
+**Toate datele vin din baza de date QuestDB de pe mașina virtuală (VM)**, nu direct de la broker:
 
-O sursă neconfigurată (ex. cTrader fără token) apare în listă ca „neconfigurat”; motivul se vede
-la trecerea mouse-ului peste listă. Dacă sursa din `.env` nu se poate folosi la pornire, serverul
-pornește cu cealaltă.
+```
+cTrader ──► collector.py (VM) ──► QuestDB (VM): ticuri, lumânări oficiale, simboluri
+                                        ▲
+                                        │ interogare la fiecare 50 ms (prin Tailscale)
+PC:  server.py (questfeed.py) ──────────┘ ──► /ws ──► browser
+```
+
+- **Pe VM** rulează QuestDB (serviciu Windows) și `collector.py` (task „Nexus Collector”, pornește la boot).
+  Colectorul salvează live fiecare tic cTrader al simbolurilor din `COLLECT_SYMBOLS` (acum EURUSD și
+  XAUUSD), completează istoricul de ticuri de la `COLLECT_START` (acum 2026-01-01) și ține la zi
+  lumânările oficiale M1–W1. Merge și cu PC-ul închis.
+- **Pe PC** rulează doar `server.py`. Nu se conectează la cTrader: citește ticurile noi din QuestDB la
+  fiecare 50 ms și tot istoricul la cerere. În aplicație apar doar simbolurile colectate pe VM.
 
 ## Cerințe
 - Python 3.10+
-- Pentru `ctrader`: un cont cTrader (merge și un cont **demo**, gratuit) și o aplicație Open API aprobată
-- Pentru `mt5`: Windows, cu terminalul MT5 pornit și logat
+- Tailscale pornit pe PC (VM-ul e accesibil doar prin Tailscale)
+- În `.env`: `QUESTDB_HOST` (adresa VM-ului), `QUESTDB_USER`, `QUESTDB_PASSWORD`
 
 ```bash
 pip install -r requirements.txt
-python ctrader_setup.py     # doar pentru ctrader, o singură dată (vezi mai jos)
 python server.py
 ```
-
-Cu `mt5`, orele din MT5 (ora serverului brokerului) sunt convertite în UTC **pentru fiecare lumânare și
-fiecare tic în parte**, după regula de fus orar a brokerului: `MT5_SERVER_TZ` în `.env` (implicit
-`Europe/Athens` = regula FBS, UTC+2 iarna și UTC+3 vara). Astfel o lumânare din ianuarie și una din
-iulie primesc fiecare decalajul corect, oricând ar fi cerute, iar trecerea la ora de vară / iarnă nu
-produce dubluri sau goluri. Pentru alt broker: un nume IANA (ex. `America/New_York`) sau un decalaj fix
-(ex. `UTC+3`); la pornire serverul avertizează dacă regula nu se potrivește cu ora ultimului tic.
-
-## Configurare cTrader (o singură dată)
-1. Intră pe https://openapi.ctrader.com/apps cu cTrader ID-ul tău și creează o aplicație.
-   Aprobarea aplicației poate dura puțin.
-2. Copiază **Client ID** și **Secret** în `.env` (vezi `.env.example`):
-   `CTRADER_CLIENT_ID=...` și `CTRADER_CLIENT_SECRET=...`
-3. La aplicație apasă **Playground**, alege scope **accounts** (doar citire) și **Get token**.
-4. Rulează `python ctrader_setup.py` și lipește Access token și Refresh token. Scriptul îți arată
-   conturile, îl alegi pe cel pentru prețuri și verifică un preț live.
-5. În pagină, alege **cTrader** din lista surselor (dacă serverul rula deja, nu trebuie repornit).
-
-Tokenul se salvează în `ctrader_token.json` și **se reînnoiește automat** înainte să expire (~30 de zile).
-Dacă vreodată e revocat, repeți pașii 3–4.
 
 La pornire, serverul afișează adresele:
 - pe acest PC: http://127.0.0.1:8000
 - de pe telefon: `http://<IP-ul PC-ului>:8000` (aceeași rețea Wi-Fi; la prima pornire permite accesul în firewall-ul Windows)
 
 **Telefon simulat pe desktop:** în Chrome/Edge apasă `F12`, apoi `Ctrl+Shift+M` și alege un telefon din listă.
+
+## Mașina virtuală (QuestDB + colector)
+- Acces de pe PC: `ssh nexus-vm` (cheia `~/.ssh/nexus_vm`; configurarea SSH: `vm_setup/setup_vm_ssh.ps1`).
+- QuestDB: `C:\questdb` (date în `C:\questdb\data`), consola web pe `http://<IP-ul VM-ului în Tailscale>:9000`
+  (utilizator și parolă din `.env`). Porturile 9000 / 8812 sunt deschise doar pentru Tailscale.
+- Colectorul: `C:\nexus` (`collector.py`, `tickdb.py`, `ctrader.py`, `.env`, `ctrader_token.json`), jurnal în
+  `C:\nexus\collector.log`. După o modificare: copiezi fișierele cu `scp` și repornești task-ul
+  „Nexus Collector”.
+- Tokenul cTrader al VM-ului e **separat** de orice alt token (la reînnoire, tokenul vechi devine invalid).
+  Un token nou: Playground → Get token, apoi pe PC
+  `$env:CTRADER_TOKEN_FILE="ctrader_token_vm.json"; python ctrader_setup.py` și copiezi fișierul pe VM ca
+  `C:\nexus\ctrader_token.json`.
+- Tabelele: `ticks` (un rând pe tic), `tick_coverage` (zilele complete), `bars` (lumânările oficiale),
+  `bar_status`, `symbols`. Interogări utile:
+  ```sql
+  SELECT symbol, count(), min(ts), max(ts) FROM ticks GROUP BY symbol;
+  SELECT symbol, status, count(), min(day) FROM tick_coverage GROUP BY symbol, status;
+  ```
+- **Compresie**: zilele de ticuri mai vechi de 7 zile, în care ambele simboluri sunt complete, se convertesc
+  automat (după fiecare completare a colectorului) în Parquet comprimat ZSTD nivel 3 (setat în `server.conf`):
+  fără pierderi, ~6 octeți pe tic în loc de ~40 (de ~6 ori mai puțin). Zilele rămân în tabelul `ticks` și se
+  citesc cu același SQL; doar interogările pe ele sunt puțin mai lente (zeci de ms). Zilele recente rămân
+  necomprimate. Pragul se schimbă cu `COLLECT_COMPRESS_DAYS` în `.env`-ul de pe VM.
+- Dacă VM-ul a fost oprit, la pornire colectorul completează singur golul din istoricul brokerului.
+  Sub 3 GB liberi pe disc, completarea spre trecut se oprește (ticurile live continuă).
+- VM-ul are un singur nucleu: QuestDB e reglat (`shared.worker.*`, `wal.apply.worker.*` în `server.conf`)
+  ca firele să nu se învârtă în așteptare; altfel interogările la 50 ms ar ocupa tot procesorul.
 
 ## Alarme de preț
 - Butonul **🔔** din dreapta sus deschide panoul. **Dublu-click pe chart** deschide panoul cu prețul de acolo.
@@ -67,57 +79,34 @@ La pornire, serverul afișează adresele:
 Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te avertizează).
 
 ## Istoric și export CSV
-- Timeframe-uri: 1s, 5s, 15s, 30s (construite din ticuri), M1, M5, M15, M30, H1, H4, D1, W1.
-- De la M1 în sus, chartul se deschide cu ultimele 10.000 de lumânări închise **din datastore-ul local**
-  (vezi mai jos) plus lumânarea în curs, de la sursă. Când derulezi chartul spre stânga, lumânările mai
-  vechi se încarcă automat: întâi din datastore, apoi de la sursă, până la capătul istoricului brokerului.
-- Cu `mt5`, terminalul păstrează cel mult „Max bars in chart” lumânări pe timeframe (implicit 100.000,
-  adică ~3 luni de M1). Pentru perioadele mai vechi, lumânările M1/M5 se construiesc din ticuri
-  (identice cu cele din MT5, dar mai lent). Ca să le iei direct din MT5: Tools → Options → Charts →
-  Max bars in chart = Unlimited, apoi repornești terminalul.
+- Timeframe-uri: **Ticuri**, 1s, 5s, 15s, 30s (lumânări calculate în QuestDB din ticuri), M1, M5, M15, M30, H1, H4, D1, W1.
+- **Ticuri**: chartul de sus arată fiecare tic ca o lumânare (bid), plus linia galbenă a ask-ului, cu ora la
+  milisecundă pe axa de timp și în dreptul cursorului. Lumânarea unui tic merge de la bid-ul ticului anterior
+  (deschidere) la bid-ul lui (închidere): verde = bid-ul a urcat, roșu = a coborât, liniuță = n-a schimbat
+  (s-a schimbat doar ask-ul). Merge orice tip de afișare și indicatorii (o lumânare = un tic). Pornește cu ultimele
+  5.000 de ticuri; la derularea spre stânga se încarcă câte 5.000 mai vechi.
+- De la M1 în sus, chartul se deschide cu lumânările închise salvate de colector (lumânările oficiale cTrader)
+  plus lumânarea în curs, calculată din ticuri. Când derulezi chartul spre stânga, lumânările mai vechi se
+  încarcă automat, până la începutul celor salvate.
 - Butonul **💾 Export CSV** din dreapta sus: alegi simbolul, timeframe-ul (sau **ticuri** bid/ask),
   data de start și data de final (zile întregi, în ora ta locală). Fișierul se scrie pe PC-ul cu serverul,
-  în `exporturi_csv/<SIMBOL>/<SIMBOL>_<TIMEFRAME>_<START>_<FINAL>.csv`
-  (ex. `exporturi_csv/EURUSD/EURUSD_M1_2025-10-15_2026-10-15.csv`); la final apare și un link de descărcare.
+  în `exporturi_csv/<SIMBOL>/<SIMBOL>_<TIMEFRAME>_<START>_<FINAL>.csv`; la final apare și un link de descărcare.
+  Datele vin din QuestDB, deci acoperă doar perioada colectată.
 - Coloane: `time_utc,open,high,low,close,volume` (volum = număr de ticuri), la ticuri `time_utc,bid,ask`.
   Orele din CSV sunt în **UTC**.
-- Durate orientative (MT5, EURUSD): un an de H1 – o secundă; un an de M1 – câteva minute; o zi de
-  ticuri ~220.000 de rânduri (un an de ticuri: zeci de milioane de rânduri, durează mult). Cu cTrader,
-  ticurile vin în pagini limitate de server, deci exporturile de ticuri sunt mai lente.
 
-## Datastore local (automat)
-Simbolul și timeframe-ul deschise în pagină (de la M1 la W1) au o bază de date locală cu lumânările
-închise, pe PC-ul cu serverul, în `datastore/`. Chartul (lumânările închise) și indicatorii citesc
-din ea, deci văd garantat aceleași date:
+## Lumânările (datastore)
+Lumânările închise M1–W1 le salvează colectorul în tabelul `bars` din QuestDB, după regulile:
+- **prima dată**: ultimele **10.000** de lumânări închise (toate, dacă brokerul are mai puține);
+- **actualizare**: la închiderea fiecărei lumânări (+2 s), lumânările noi se adaugă, iar ultimele 5 se
+  rescriu (o lumânare corectată de broker se înlocuiește); cele vechi nu se șterg, deci seria crește;
+- **completare spre trecut**: sub 10.000 de lumânări, până la capătul istoricului brokerului.
 
-```
-datastore/
-  mt5/                  <- sursa prețurilor (ctrader sau mt5; prețurile și orele diferă între ele)
-    EURUSD/             <- simbolul
-      D1/               <- timeframe-ul
-        EURUSD_D1.csv   <- lumânările: time_utc,open,high,low,close,volume (UTC, ca la export)
-        info.json       <- ce conține fișierul: prima și ultima lumânare, câte sunt, dacă e tot istoricul
-      H1/
-        EURUSD_H1.csv
-        info.json
-```
-
-- **Prima deschidere** a unui simbol / timeframe descarcă ultimele **10.000** de lumânări închise (dacă
-  sursa are mai puține, toate câte are). Chartul apare când descărcarea e gata.
-- **Progresul** se vede live pe chart, în stânga sus, lângă „ƒx Indicatori”: `💾 Descarc M1: 40% · 4.000 / 10.000`
-  cu bară de progres; apoi `💾 M1 · 100% · 10.000 lumânări` (la trecerea mouse-ului: fișierul, prima și
-  ultima lumânare). 100% = baza de date e completă și indicatorii rulează pe ea.
-- **Actualizare**: cât timp perechea e deschisă într-o pagină, la închiderea fiecărei lumânări (+3 s)
-  serverul cere lumânarea oficială de la broker și o **adaugă la final**. Lumânările vechi nu se șterg,
-  deci fișierul crește peste 10.000 (numărul de pe chart crește). La redeschidere, golul de când a fost
-  închisă se completează dintr-o dată, deci fișierul nu are goluri.
-- **Verificare**: la fiecare actualizare, ultimele 5 lumânări din fișier se compară cu sursa: o lumânare
-  corectată de broker se rescrie, iar un fișier cu ore decalate se reface de la zero.
-- **Completare spre trecut**: un fișier cu mai puțin de 10.000 de lumânări se completează spre trecut,
-  dacă sursa are istoric mai vechi.
-- Se salvează doar lumânările închise; nu se salvează ticuri (rămân doar în memorie, pentru chartul live).
-- Timeframe-urile sub un minut (1s–30s) nu se salvează (sunt construite din ticuri), deci pe ele
-  indicatorii nu rulează.
+Serverul (`datastore.py`) le citește de acolo: chartul și indicatorii văd garantat aceleași lumânări.
+Starea se vede pe chart, în stânga sus, lângă „ƒx Indicatori”: `💾 M1 · 100% · 10.026 lumânări`.
+Sub un minut (1s–30s) lumânările nu sunt salvate separat: le calculează QuestDB din ticuri (`SAMPLE BY`), ultimele
+10.000 închise, iar chartul și indicatorii le folosesc la fel ca pe celelalte timeframe-uri.
+Vechiul folder `datastore/` (CSV-uri pe PC) nu mai e folosit și poate fi șters.
 
 ## Indicatori
 - Butonul **ƒx Indicatori** din stânga sus a chartului deschide meniul: cauți indicatorul, îl selectezi
@@ -126,7 +115,7 @@ datastore/
 - Indicatorii se calculează **pe server, din datastore-ul local**, doar pe lumânări închise (nu se
   redesenează), într-un proces separat (prețurile live nu încetinesc), cu rezultatul ținut în cache.
   Pagina trimite doar simbolul, timeframe-ul și parametrii; la fiecare lumânare închisă serverul
-  recalculează și trimite singur rezultatul nou. Pe 1s–30s indicatorii nu rulează.
+  recalculează și trimite singur rezultatul nou (sub un minut și pe „Ticuri”, cel mult o dată la 5 secunde).
 - **Linii de trend**: rulează partea a 2-a din `analysis.py` pe ultimele 1000 de lumânări închise din
   datastore și desenează dreptele valide, prelungite până la lumânarea în curs. În dreapta sus apare
   sliderul de apropiere (la prima atașare 50%): la N% se văd doar liniile aflate la cel mult N% din
@@ -154,20 +143,21 @@ datastore/
 
 ## Fișiere
 - `server.py`: WebSocket-ul de prețuri către pagini, istoricul pentru chart, API-ul pentru alarme
-- `ctrader.py`: conexiunea cu cTrader Open API (prețuri live, istoric, reconectare, reînnoirea tokenului)
-- `mt5feed.py`: sursa de prețuri din terminalul MetaTrader 5 (aceleași funcții ca `ctrader.py`)
-- `datastore.py`: baza de date locală cu lumânări (descărcare, actualizare, verificare, `load_bars`)
+- `questfeed.py`: sursa de prețuri a serverului: QuestDB de pe VM (ticuri live la 50 ms, istoric, lumânări)
+- `tickdb.py`: legătura cu QuestDB (tabelele, scrierea pe loturi, interogările)
+- `collector.py`: colectorul de pe VM (ticuri live, istoric de ticuri, lumânări oficiale, simboluri)
+- `ctrader.py`: conexiunea cu cTrader Open API, folosită de colector (prețuri live, istoric, reînnoirea tokenului)
+- `ctrader_setup.py`: configurarea inițială a tokenului și a contului cTrader
+- `datastore.py`: lumânările închise citite din QuestDB (`load_bars`)
 - `indicators.py`: calculul indicatorilor pe server (rulează în procese separate)
-- `mtf.py`: zilele anului din datastore-ul D1, pentru indicatorul „Trend multi-timeframe”
-- `ctrader_setup.py`: configurarea inițială a tokenului și a contului
+- `mtf.py`: zilele anului din lumânările D1, pentru indicatorul „Trend multi-timeframe”
 - `alerts.py`: salvarea și verificarea alarmelor, trimiterea e-mailurilor
 - `push.py`: notificările push (cheia VAPID în `vapid_private.pem`, dispozitivele în `push_subscriptions.json`)
+- `vm_setup/setup_vm_ssh.ps1`: configurarea SSH + Tailscale pe VM (rulat o dată, ca Administrator)
 - `static/`: interfața (chart de lumânări, chart de ticuri, panoul de alarme, exportul CSV în `export.js`,
   meniul de indicatori în `indicators.js`, indicatorul „Linii de trend” în `trend.js`, „Trend
-  multi-timeframe” în `mtf.js`, starea
-  datastore-ului de pe chart în `datastore.js`)
+  multi-timeframe” în `mtf.js`, starea lumânărilor de pe chart în `datastore.js`)
 - `exporturi_csv/`: fișierele CSV exportate (câte un subfolder pentru fiecare simbol)
-- `datastore/`: baza de date locală cu lumânări, pe sursă / simbol / timeframe (vezi mai sus)
 
 ## Notificări push (Windows / Android)
 - În fereastra de alarme: **Notificări pe acest dispozitiv → Activează notificări** și permite în browser.
@@ -180,12 +170,12 @@ datastore/
 - iPhone: întâi Share → Add to Home Screen, apoi activezi notificările din aplicația de pe ecranul principal.
 
 ## De reținut
-- Prețurile sunt cele ale brokerului sursei alese (cTrader sau MT5), deci pot diferi ușor între ele.
+- Prețurile sunt cele ale contului cTrader al colectorului de pe VM.
 - Rata de actualizare e cea a feed-ului brokerului: un tic nou apare doar când brokerul trimite o cotație nouă.
+  Pe pagină, un tic ajunge de obicei la ~50–150 ms după ora brokerului (colector → QuestDB → interogarea la 50 ms).
 - Orele sunt afișate în ora locală a dispozitivului.
-- La timeframe-urile sub un minut (1s–30s), istoricul se construiește din ticuri. Pe 15s/30s, într-o piață
-  foarte activă, pot apărea mai puține lumânări la deschidere; restul se completează live.
-- Dacă se pierde legătura cu sursa de prețuri (cTrader sau terminalul MT5), serverul se reconectează
+- La timeframe-urile sub un minut (1s–30s), lumânările se calculează din ticurile din QuestDB.
+- Dacă se pierde legătura cu QuestDB (VM oprit, Tailscale oprit), serverul se reconectează
   singur, iar pagina afișează starea și își reîncarcă istoricul la revenire.
 - Cu `HOST=0.0.0.0` (implicit), oricine din rețeaua ta locală poate deschide pagina și seta alarme.
   Pune `HOST=127.0.0.1` în `.env` dacă vrei acces doar de pe PC.

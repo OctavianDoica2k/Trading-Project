@@ -1,28 +1,26 @@
 """
-Server de prețuri live -> browser, prin WebSocket. Serverul pornește pe sursa din PRICE_SOURCE (.env,
-implicit cTrader); în timpul rulării sursa se poate schimba din pagină (lista din bara de sus):
-  - ctrader : cTrader Open API, prin internet, fără niciun program deschis
-              (configurare o singură dată: python ctrader_setup.py);
-  - mt5     : terminalul MetaTrader 5 (ex. FBS), care trebuie să fie pornit și logat pe PC.
+Server de prețuri live -> browser, prin WebSocket. Toate datele (ticuri live, istoric, lumânări,
+simboluri) vin din baza de date QuestDB de pe mașina virtuală (VM), ținută la zi de collector.py;
+PC-ul nu se conectează la cTrader.
 Pornire:
     python server.py            -> http://127.0.0.1:8000  (și de pe telefon, din aceeași rețea)
 """
 # =====================================================================================
 #  CE FACE ACEST FIȘIER (pe scurt)
 # -------------------------------------------------------------------------------------
-#  1. Se conectează la sursa de prețuri: cTrader prin internet (vezi ctrader.py) sau terminalul
-#     MT5 de pe PC (vezi mt5feed.py). Ambele oferă aceleași funcții, deci restul codului nu
-#     depinde de sursă.
-#  2. Urmărește prețurile simbolurilor deschise în pagini și ale celor cu alarme active.
-#     Fiecare cotație nouă (un „tic” = o nouă cotație bid/ask) ajunge imediat la server.
+#  1. Citește prețurile din QuestDB (vezi questfeed.py): ticurile noi la fiecare 50 ms, istoricul
+#     și lumânările la cerere. QuestFeed are aceleași funcții ca vechea conexiune cTrader
+#     (ctrader.py), deci restul codului nu depinde de sursă.
+#  2. Urmărește prețurile simbolurilor colectate pe VM (cele din COLLECT_SYMBOLS ale colectorului).
+#     Fiecare cotație nouă (un „tic” = o nouă cotație bid/ask) ajunge la server la ~50 ms după
+#     ce a fost salvată.
 #  3. Ticurile noi sunt trimise instant către toate paginile deschise în browser, printr-o
 #     conexiune WebSocket (o conexiune permanentă, în ambele sensuri, între pagină și server).
 #  4. Tot aici sunt definite adresele API (de ex. /api/alerts) folosite de pagină pentru
 #     alarme de preț, e-mail de test și notificări push.
 #
 #  Biblioteci folosite:
-#   - websockets  : conexiunea cu cTrader (în ctrader.py).
-#   - MetaTrader5 : legătura cu terminalul MT5 (în mt5feed.py, doar când sursa e MT5).
+#   - questdb     : clientul QuestDB (în tickdb.py; serverul doar citește, prin HTTP).
 #   - FastAPI     : framework web – definește adresele (rutele) serverului.
 #   - uvicorn     : serverul web propriu-zis, care rulează aplicația FastAPI.
 #   - dotenv      : citește setările din fișierul .env (parole SMTP, date cTrader etc.).
@@ -81,42 +79,39 @@ ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 
 # Modulele proiectului: alarmele + e-mailul (alerts.py), notificările push (push.py)
-# și conexiunea cu cTrader (ctrader.py). mt5feed.py se încarcă doar dacă e folosit (mai jos).
+# și sursa de prețuri, QuestDB de pe VM (questfeed.py, tickdb.py).
 import indicators as calc  # noqa: E402 - calculul indicatorilor (în procese separate)
 import mtf  # noqa: E402 - zilele din datastore pentru „Trend multi-timeframe”
 from alerts import AlertStore, Mailer, valid_email  # noqa: E402 - după load_dotenv
-from ctrader import PERIODS, CTraderError, CTraderFeed, TokenStore  # noqa: E402
-from datastore import Datastore  # noqa: E402 - baza de date locală cu lumânări
+from ctrader import PERIODS, CTraderError  # noqa: E402 - timeframe-urile și erorile sursei
+from datastore import Datastore  # noqa: E402 - lumânările închise, din QuestDB
+from questfeed import QuestFeed  # noqa: E402 - sursa de prețuri: QuestDB de pe VM
+from tickdb import TickDB  # noqa: E402
 from heikin_aishi import heikin_ashi  # noqa: E402 - lumânările Heikin-Ashi de pe chart
 import fastframe  # noqa: E402 - rulează heikin_ashi() repede (vezi fastframe.py)
 from push import PushService  # noqa: E402
 
 # --- Constante de configurare ---
-HISTORY_BARS = 600      # câte lumânări trimitem la conectare pentru timeframe-urile sub un minut
-# De la M1 în sus trimitem la conectare ultimele MAX_INITIAL_BARS lumânări închise din datastore
-# (+ lumânarea în curs, de la sursă); restul istoricului se încarcă la derularea chartului spre
-# stânga, câte OLDER_BARS lumânări odată (vezi /api/bars): întâi din datastore, apoi de la sursă.
+# La conectare trimitem ultimele MAX_INITIAL_BARS lumânări închise din datastore (+ lumânarea în
+# curs); restul istoricului se încarcă la derularea chartului spre stânga, câte OLDER_BARS lumânări
+# odată (vezi /api/bars): întâi din datastore, apoi direct din QuestDB.
 MAX_INITIAL_BARS = 10_000
 OLDER_BARS = 5000
-RECENT_TICKS = 600      # câte ticuri trimitem pentru chartul de ticuri
-# Pentru lumânările sub un minut cerem ticuri în bucăți (vezi CTraderFeed.ticks); cel mult
-# atâtea bucăți, ca deschiderea chartului să nu dureze prea mult.
-MAX_TICK_PAGES = 12
+RECENT_TICKS = 600      # câte ticuri trimitem pentru chartul de ticuri (jos)
+# Timeframe-ul „Ticuri” (tf = 0): câte ticuri trimitem la conectare și la fiecare derulare spre stânga.
+TICK_HISTORY = 5000
 # Cât așteptăm istoricul pentru o pagină nouă înainte să-i spunem să reîncerce (secunde).
 HELLO_TIMEOUT = 30
 
-# Timeframe-uri suportate (secunde). Sub 60s lumânările se construiesc din ticuri; de la M1 în
-# sus le primim gata calculate de la sursa de prețuri (vezi PERIODS în ctrader.py).
+# Timeframe-uri suportate (secunde). 0 = ticuri brute, unul câte unul. Sub 60s lumânările se
+# calculează în QuestDB din ticuri; de la M1 în sus sunt lumânările oficiale cTrader (PERIODS).
 SUB_MINUTE = (1, 5, 15, 30)
-TIMEFRAMES = set(SUB_MINUTE) | set(PERIODS)
+TIMEFRAMES = {0} | set(SUB_MINUTE) | set(PERIODS)
 # Numele timeframe-urilor, folosite în numele fișierelor CSV (0 = ticuri brute bid/ask).
 TF_LABELS = {0: "ticuri", 1: "1s", 5: "5s", 15: "15s", 30: "30s", 60: "M1", 300: "M5", 900: "M15",
              1800: "M30", 3600: "H1", 14400: "H4", 86400: "D1", 604800: "W1"}
 # Folderul în care se salvează exporturile CSV (câte un subfolder pentru fiecare simbol).
 EXPORT_DIR = ROOT / "exporturi_csv"
-# Baza de date locală cu lumânări, ținută la zi pentru simbolul / timeframe-ul deschis:
-# datastore/<sursă>/<SIMBOL>/<TIMEFRAME>/<SIMBOL>_<TIMEFRAME>.csv (vezi datastore.py).
-DATASTORE_DIR = ROOT / "datastore"
 
 # Folderul cu fișierele paginii web (HTML, CSS, JavaScript).
 STATIC = ROOT / "static"
@@ -126,13 +121,11 @@ PORT = int(os.getenv("PORT", "8000"))
 # Se schimbă la fiecare pornire a serverului: pagina îl primește în hello și, la prima deschidere
 # după o repornire, pornește cu chartul fără indicatori (indicators.js).
 BOOT_ID = f"{time.time_ns():x}"
-# Sursele de prețuri: id (folosit în .env, în adrese și în datastore) -> nume afișat.
-SOURCES = {"mt5": "MT5", "ctrader": "cTrader"}
-# Sursa activă: la pornire cea din .env (implicit cTrader); se poate schimba din pagină, până la
-# următoarea repornire (vezi use_source).
-PRICE_SOURCE = os.getenv("PRICE_SOURCE", "ctrader").strip().lower()
-SOURCE_NAME = SOURCES.get(PRICE_SOURCE, PRICE_SOURCE)
-CTRADER_TOKEN_FILE = Path(os.getenv("CTRADER_TOKEN_FILE", ROOT / "ctrader_token.json"))
+# Sursa prețurilor: id (coloana source din QuestDB) -> nume afișat. Datele sunt prețurile cTrader
+# salvate de colectorul de pe VM.
+SOURCES = {"ctrader": "cTrader (VM)"}
+PRICE_SOURCE = "ctrader"
+SOURCE_NAME = SOURCES[PRICE_SOURCE]
 
 
 # =====================================================================================
@@ -213,42 +206,29 @@ class TickHub:
 
 
 # =====================================================================================
-#  Sursa de prețuri (MT5 sau cTrader), aleasă la pornire și schimbabilă din pagină
+#  Sursa de prețuri: QuestDB de pe VM
 # -------------------------------------------------------------------------------------
 #  `feed` e sursa activă; tot restul serverului o folosește prin această variabilă globală.
-#  La schimbare (use_source) oprim conexiunea veche, creăm și pornim una nouă, apoi anunțăm
-#  paginile, care își cer din nou istoricul de la noua sursă.
 # =====================================================================================
-# De ce nu se poate folosi o sursă acum (text pentru pagină), sau None dacă se poate.
+# De ce nu se poate folosi sursa (text pentru pagină), sau None dacă se poate.
 def source_problem(source: str) -> str | None:
-    if source == "mt5":
-        try:
-            import MetaTrader5  # noqa: F401 - verificăm doar că pachetul există
-        except ImportError:
-            return "lipsește pachetul MetaTrader5 (pip install MetaTrader5, doar pe Windows)"
-        return None
-    if source == "ctrader":
-        if not os.getenv("CTRADER_CLIENT_ID", "").strip() or not os.getenv("CTRADER_CLIENT_SECRET", "").strip():
-            return "lipsesc CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET din .env"
-        if not TokenStore(CTRADER_TOKEN_FILE).configured:
-            return "lipsește tokenul; rulează o dată: python ctrader_setup.py"
-        return None
-    return f"sursă necunoscută: {source}"
+    if source not in SOURCES:
+        return f"sursă necunoscută: {source}"
+    if not os.getenv("QUESTDB_HOST", "").strip():
+        return "lipsește QUESTDB_HOST din .env (adresa VM-ului cu QuestDB)"
+    return None
 
 
-# O conexiune nouă cu sursa (de fiecare dată una nouă, ca să citească tokenul / setările curente).
+# O conexiune nouă cu sursa.
 def make_feed(source: str):
-    if source == "mt5":
-        from mt5feed import MT5Feed  # doar pe Windows, cu pachetul MetaTrader5
-        f = MT5Feed()
-    else:
-        f = CTraderFeed(os.getenv("CTRADER_CLIENT_ID", "").strip(),
-                        os.getenv("CTRADER_CLIENT_SECRET", "").strip(), TokenStore(CTRADER_TOKEN_FILE))
+    f = QuestFeed(source)
     # Fiecare tic primit de la sursa de prețuri trece prin hub.
     f.on_ticks = hub.ticks
     # Paginile află când cade sau revine conexiunea cu sursa (la revenire își reîncarcă istoricul).
     # Mesajele unei surse care nu mai e activă (oprită la schimbare) sunt ignorate.
     f.on_status = lambda up: f is feed and hub.broadcast({"type": "feed", "up": up})
+    # ... și cât din golul de ticuri a recuperat colectorul (bara de progres din pagină).
+    f.on_sync = lambda st: f is feed and hub.broadcast({"type": "sync", **st})
     return f
 
 
@@ -279,7 +259,7 @@ async def use_source(source: str):
 hub = TickHub()
 alerts = AlertStore(Path(os.getenv("ALERTS_FILE", ROOT / "alerts.json")), Mailer())
 # hub-ul îi spune sursei de prețuri ce simboluri să urmărească ...
-hub.on_wanted = lambda names: feed and feed.want(names)
+hub.on_wanted = lambda names: feed and feed.want(names, viewers=bool(hub.subs))
 # ... și întreabă alarmele ce simboluri trebuie urmărite permanent ...
 hub.watched = alerts.active_symbols
 # ... și le trimite fiecare tic nou, ca să verifice prețurile țintă.
@@ -315,16 +295,10 @@ async def keep_synced():
 # Tot ce e înainte de `yield` rulează la pornire; tot ce e după, la oprire.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Sursa din .env; dacă nu se poate folosi (ex. cTrader fără token), trecem pe cealaltă.
+    # Fără adresa QuestDB în .env serverul nu are de unde citi prețurile.
     source = PRICE_SOURCE
-    if source not in SOURCES:
-        raise RuntimeError(f"PRICE_SOURCE necunoscut: {source} (folosește ctrader sau mt5)")
     if problem := source_problem(source):
-        other = next(s for s in SOURCES if s != source)
-        if source_problem(other):
-            raise RuntimeError(f"{SOURCES[source]}: {problem}")
-        print(f"[WEB] {SOURCES[source]} indisponibil ({problem}); folosesc {SOURCES[other]}")
-        source = other
+        raise RuntimeError(f"{SOURCES[source]}: {problem}")
     hub.loop = asyncio.get_running_loop()
     # Procesele pentru calculul indicatorilor (pornesc acum, ca primul calcul să nu aștepte după ele).
     get_pool()
@@ -401,7 +375,7 @@ async def index():
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
-# Lista simbolurilor sursei active. "visible" = cele afișate/active (Market Watch la MT5), "all" =
+# Lista simbolurilor sursei active (cele colectate pe VM). "visible" = cele din meniu, "all" =
 # toate simbolurile brokerului (sugestiile din fereastra de export); "tree" = simbolurile cu
 # descrierea și categoria lor, pentru meniul de simboluri din bara de sus.
 @app.get("/api/symbols")
@@ -420,7 +394,7 @@ async def list_sources():
             "sources": [{"id": s, "name": n, "problem": source_problem(s)} for s, n in SOURCES.items()]}
 
 
-# Datele trimise de pagină la schimbarea sursei: {"source": "mt5"} sau {"source": "ctrader"}.
+# Datele trimise de pagină la schimbarea sursei: {"source": "ctrader"} (singura sursă acum).
 class SourceIn(BaseModel):
     source: str
 
@@ -599,7 +573,7 @@ async def test_email(t: TestEmailIn):
 # Construiește lumânări de 1s/5s/15s/30s din ticurile bid [(timp_ms, preț), ...] (cronologic).
 # O lumânare = Open (primul preț din interval), High (maximul), Low (minimul), Close (ultimul).
 # volume = numărul de ticuri din lumânare. limit = câte lumânări (cele mai noi) întoarcem.
-def candles_from_ticks(ticks: list[tuple[int, float]], tf: int, limit: int | None = HISTORY_BARS) -> list[dict]:
+def candles_from_ticks(ticks: list[tuple[int, float]], tf: int, limit: int | None = None) -> list[dict]:
     bars: list[dict] = []
     for msc, p in ticks:
         # Începutul intervalului din care face parte ticul (în secunde).
@@ -640,25 +614,25 @@ def merge_ticks(bid: list[tuple[int, float]], ask: list[tuple[int, float]], coun
 
 # Pregătește primul mesaj („hello”) trimis unei pagini proaspăt conectate:
 # informații despre simbol + istoricul de lumânări + ultimele ticuri, de la sursa `feed`.
-# De la M1 în sus, lumânările închise vin din datastore-ul perechii `pair` (deja adus la zi), ca
-# chartul și indicatorii să vadă exact aceleași date; doar lumânarea în curs vine de la sursă.
+# Lumânările închise vin din datastore-ul perechii `pair` (deja adus la zi), ca chartul și
+# indicatorii să vadă exact aceleași date; doar lumânarea în curs se calculează separat.
+# La „Ticuri” (tf = 0) pagina primește ticurile (`ticks` = ultimele TICK_HISTORY) și face singură
+# câte o lumânare pe tic; datastore-ul perechii face aceleași lumânări, pentru indicatori.
 async def build_hello(feed, symbol: str, tf: int, pair: "Pair | None") -> dict:
     info = await feed.info(symbol)
     last = await feed.quote(symbol)
     # Istoricul se termină la ultimul tic (în weekend, la închiderea pieței de vineri).
     end = (last[0] if last else int(time.time() * 1000)) + 1
-    if tf in PERIODS:
-        # Lumânările închise din datastore + ce e mai nou de la sursă (lumânarea în curs).
+    bars, ticks = [], []
+    if tf == 0:
+        ticks = await feed.tick_rows(symbol, end, TICK_HISTORY)
+    else:
+        # Lumânările închise din datastore + ce e mai nou (lumânarea în curs).
         bars = await pair.store.load_bars(MAX_INITIAL_BARS)
         closed = bars[-1]["time"] if bars else 0
         bars += [b for b in await feed.trendbars(symbol, tf, 3, end) if b["time"] > closed]
-        # Ticurile bid din ultima oră, pentru chartul de ticuri.
-        bid = await feed.ticks(symbol, "BID", end - 3600_000, end, max_pages=1)
-    else:
-        # Sub un minut: le construim din ticurile bid ale ultimelor HISTORY_BARS intervale.
-        bid = await feed.ticks(symbol, "BID", end - tf * HISTORY_BARS * 1000, end, max_pages=MAX_TICK_PAGES)
-        bars = candles_from_ticks(bid, tf)
-    # Ticurile ask din ultima oră, combinate apoi cu cele bid în [timp, bid, ask].
+    # Ticurile bid / ask din ultima oră, combinate în [timp, bid, ask], pentru chartul de ticuri.
+    bid = await feed.ticks(symbol, "BID", end - 3600_000, end, max_pages=1)
     ask = await feed.ticks(symbol, "ASK", end - 3600_000, end, max_pages=1)
     return {
         "type": "hello",
@@ -672,37 +646,42 @@ async def build_hello(feed, symbol: str, tf: int, pair: "Pair | None") -> dict:
         "last": last,
         "recent": merge_ticks(bid, ask, RECENT_TICKS),
         "bars": bars,
+        "ticks": ticks,
+        "sync": feed.sync,
         "boot": BOOT_ID,
     }
 
 
 # Lumânări mai vechi decât `before` (secunde UTC), cerute de pagină când chartul e derulat spre
-# stânga: întâi din datastore (aceleași date ca indicatorii), iar dincolo de începutul lui, de la
-# sursă. O listă goală înseamnă că sursa nu mai are istoric.
+# stânga: întâi din datastore (aceleași date ca indicatorii), iar dincolo de începutul lui, direct
+# din QuestDB (sub un minut, căutarea sare peste nopți, weekenduri și pauzele zilnice ale
+# brokerului). O listă goală înseamnă că nu mai există istoric.
 @app.get("/api/bars")
 async def older_bars(symbol: str, tf: int, before: int):
     name = feed.resolve(symbol)
-    if name is None or tf not in TIMEFRAMES:
+    if name is None or tf not in TIMEFRAMES or tf == 0:
         raise HTTPException(400, "Simbol sau timeframe necunoscut")
-    end = before * 1000
     try:
-        if tf in PERIODS:
-            bars = await STORE.get(PRICE_SOURCE, name, tf).load_before(before, OLDER_BARS)
-            # Am ajuns la începutul datastore-ului: continuăm direct de la sursă.
-            if not bars:
-                bars = await feed.trendbars(name, tf, OLDER_BARS, end)
-        else:
-            # Sub un minut: aflăm din ultima lumânare M1 unde se termină istoricul (în weekend
-            # sau de sărbători nu există ticuri), apoi construim lumânările din ticurile de dinainte.
-            m1 = await feed.trendbars(name, 60, 1, end)
-            if not m1:
-                return {"bars": []}
-            end = min(end, (m1[-1]["time"] + 60) * 1000)
-            bid = await feed.ticks(name, "BID", end - tf * HISTORY_BARS * 1000, end, max_pages=MAX_TICK_PAGES)
-            bars = [b for b in candles_from_ticks(bid, tf) if b["time"] < before]
+        bars = await STORE.get(PRICE_SOURCE, name, tf).load_before(before, OLDER_BARS)
+        # Am ajuns la începutul datastore-ului: continuăm direct din QuestDB.
+        if not bars:
+            bars = [b for b in await feed.trendbars(name, tf, OLDER_BARS, before * 1000) if b["time"] < before]
     except (CTraderError, ConnectionError, asyncio.TimeoutError) as e:
         raise HTTPException(503, f"{SOURCE_NAME} indisponibil: {e}") from e
     return {"bars": bars}
+
+
+# Ticuri mai vechi decât `before` (ms UTC), pentru timeframe-ul „Ticuri” derulat spre stânga:
+# [[timp_ms, bid, ask], ...]. O listă goală înseamnă că nu mai există ticuri salvate.
+@app.get("/api/ticks")
+async def older_ticks(symbol: str, before: int):
+    name = feed.resolve(symbol)
+    if name is None:
+        raise HTTPException(400, "Simbol necunoscut")
+    try:
+        return {"ticks": await feed.tick_rows(name, before, TICK_HISTORY)}
+    except (ConnectionError, asyncio.TimeoutError) as e:
+        raise HTTPException(503, f"{SOURCE_NAME} indisponibil: {e}") from e
 
 
 # Lumânările Heikin-Ashi pentru lumânările trimise de pagină (afișarea „Heikin-Ashi” de pe chart),
@@ -738,10 +717,14 @@ async def heikin_ashi_bars(b: BarsIn):
 #   3. Indicatorii citesc doar din datastore (load_bars), într-un proces separat, cu rezultatul ținut
 #      în cache; pagina trimite doar id-ul și parametrii indicatorului, iar rezultatul vine înapoi
 #      prin mesajul "indicator", și din nou după fiecare lumânare închisă.
-STORE = Datastore(DATASTORE_DIR)
-# Câte secunde după închiderea unei lumânări o cerem de la sursă (sursa are nevoie de un moment
-# ca s-o finalizeze).
-CLOSE_DELAY = 3
+STORE = Datastore(TickDB(PRICE_SOURCE))
+# Câte secunde după închiderea unei lumânări o citim din QuestDB (colectorul o cere de la broker
+# la 2 s după închidere și o scrie imediat).
+CLOSE_DELAY = 8
+# Sub un minut: lumânările se citesc la SUB_DELAY secunde după închidere, cel mult o dată la
+# SUB_STEP secunde (vezi Pair.keep).
+SUB_DELAY = 1
+SUB_STEP = 5
 # Procesele pentru calculul indicatorilor (create la pornire, în lifespan).
 INDICATOR_WORKERS = 2
 pool: ProcessPoolExecutor | None = None
@@ -808,17 +791,23 @@ class Pair:
             self.keeper = asyncio.create_task(self.keep())
 
     # Ține datastore-ul la zi: se trezește la închiderea fiecărei lumânări (după grila lumânărilor
-    # salvate) + CLOSE_DELAY și cere lumânarea oficială. Cel mult o oră între verificări (D1 / W1
+    # salvate) + CLOSE_DELAY și citește lumânarea închisă. Cel mult o oră între verificări (D1 / W1
     # se mută cu o oră la trecerea pe ora de vară / iarnă). Dacă s-a adăugat ceva, recalculează
-    # indicatorii paginilor.
+    # indicatorii paginilor. Sub un minut, lumânările vin direct din ticuri (fără colector): se
+    # citesc după SUB_DELAY, dar cel mult o dată la SUB_STEP secunde (liniile de trend pe 1000 de
+    # lumânări durează câteva secunde; la fiecare secundă ar ține ocupat un proces de calcul).
     async def keep(self):
+        step = self.tf if self.tf >= 60 else max(self.tf, SUB_STEP)
+        delay = CLOSE_DELAY if self.tf >= 60 else SUB_DELAY
         while True:
             last = self.store.last_time()
             now = time.time()
+            if self.tf == 0:
+                last = None if last is None else last / 1000   # „Ticuri”: ora lumânărilor e în ms
             # Ora la care se închide lumânarea în curs: ultima salvată + un număr întreg de
-            # timeframe-uri, prima după „acum”. Fără lumânări salvate: peste un minut.
-            wake = now + 60 if last is None else last + (int((now - last) // self.tf) + 1) * self.tf
-            await asyncio.sleep(max(1.0, min(wake, now + 3600) - now + CLOSE_DELAY))
+            # pași, prima după „acum”. Fără lumânări salvate: peste un minut.
+            wake = now + 60 if last is None else last + (int((now - last) // step) + 1) * step
+            await asyncio.sleep(max(1.0, min(wake, now + 3600) - now + delay))
             try:
                 changed = await self.sync()
             except Exception as e:  # noqa: BLE001 - reîncercăm la următoarea închidere
@@ -1037,8 +1026,9 @@ async def run_export(job: dict, path: Path, name: str, tf: int, start: int, end:
             t = start
             while t < end:
                 to = min(t + step, end)   # bucata curentă: [t, to)
-                if tf in PERIODS:
-                    # M1 și peste: lumânările gata calculate de sursă.
+                if tf > 0:
+                    # Lumânările: oficiale de la M1 în sus, calculate în QuestDB din ticuri sub un
+                    # minut (aceleași ca pe chart).
                     rows = bar_rows(await feed.bars_range(name, tf, t, to))
                 else:
                     # Ticuri sau lumânări sub un minut: pornim de la ticurile bid ale bucății.
@@ -1175,13 +1165,12 @@ class MtfWatch:
                 return self.last, False
             msg = {"type": "indicator", "id": "mtf", "symbol": self.name}
             store = self.store
-            rel = store.path.relative_to(ROOT).as_posix()
+            rel = store.where
             try:
                 digits = (await self.feed.info(self.name))["digits"]
-                self.progress(1, f"caut {rel}")
-                existed = await asyncio.to_thread(store.path.exists)
-                self.progress(2, "verific ultimele zile și adaug ce lipsește…" if existed
-                              else "nu există: îl creez (ultimele 10.000 de zile închise)…")
+                self.progress(1, f"citesc {rel}")
+                existed = True   # lumânările D1 le salvează colectorul de pe VM
+                self.progress(2, "citesc zilele noi din QuestDB…")
                 await store.sync(self.feed, digits, self.store_progress)
                 added = store._added   # zile adăugate la această sincronizare
                 bars = await store.load_bars()
@@ -1324,8 +1313,8 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
             params = data.get("params") if isinstance(data.get("params"), dict) else {}
             if pair is None:
                 conn.send({"type": "indicator", "id": ind_id, "symbol": name, "tf": tf,
-                           "error": "Indicatorii nu rulează pe 1s–30s (aceste lumânări nu se salvează "
-                                    "în datastore). Alege M1 sau un timeframe mai mare."})
+                           "error": "Indicatorii nu rulează pe „Ticuri” (nu sunt lumânări). "
+                                    "Alege 1s sau un timeframe mai mare."})
                 return
             conn.indicators[ind_id] = params
             job = asyncio.create_task(send_indicator(pair, conn, ind_id, params))
@@ -1336,39 +1325,38 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
         # Detectează închiderea paginii (și primește mesajele ei).
         receiver = asyncio.create_task(ws.receive_text())
         started = time.monotonic()
-        if tf in PERIODS:
-            # Datastore-ul perechii se aduce la zi înainte de hello: chartul primește lumânările
-            # închise din el. Între timp pagina primește progresul (mesajele "store").
-            try:
-                info = await asyncio.wait_for(src.info(name), HELLO_TIMEOUT)
-            except Exception as e:  # noqa: BLE001
-                print(f"[WEB] {SOURCES[source]} {name}: {str(e) or type(e).__name__}")
-                await fail(f"{SOURCES[source]} indisponibil", retry=True)
-                return
-            pair = join_pair(src, source, name, tf, conn, info["digits"])
-            if pair.store.status.get("state") == "syncing":
-                conn.send({"type": "store", "symbol": name, "tf": tf, **pair.store.status})
-            sync = asyncio.ensure_future(pair.sync())
-            # Cât durează sincronizarea: trimitem paginii progresul și citim mesajele ei.
-            while not sync.done():
-                ctrl_getter = asyncio.create_task(conn.ctrl.get())
-                done, _ = await asyncio.wait({sync, ctrl_getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
-                if ctrl_getter in done:
-                    await ws.send_text(ctrl_getter.result())
-                else:
-                    ctrl_getter.cancel()
-                if receiver in done:
-                    on_client(receiver.result())   # ridică WebSocketDisconnect dacă s-a închis
-                    receiver = asyncio.create_task(ws.receive_text())
-            try:
-                sync.result()
-            except Exception as e:  # noqa: BLE001 - orice eroare ajunge ca mesaj în pagină
-                reason = str(e) or type(e).__name__
-                print(f"[DATASTORE] {pair.label}: {reason}")
-                while not conn.ctrl.empty():
-                    await ws.send_text(conn.ctrl.get_nowait())
-                await fail(f"datastore {TF_LABELS[tf]}: {reason}", retry=True)
-                return
+        # Datastore-ul perechii se aduce la zi înainte de hello: chartul primește lumânările
+        # închise din el. Între timp pagina primește progresul (mesajele "store").
+        try:
+            info = await asyncio.wait_for(src.info(name), HELLO_TIMEOUT)
+        except Exception as e:  # noqa: BLE001
+            print(f"[WEB] {SOURCES[source]} {name}: {str(e) or type(e).__name__}")
+            await fail(f"{SOURCES[source]} indisponibil", retry=True)
+            return
+        pair = join_pair(src, source, name, tf, conn, info["digits"])
+        if pair.store.status.get("state") == "syncing":
+            conn.send({"type": "store", "symbol": name, "tf": tf, **pair.store.status})
+        sync = asyncio.ensure_future(pair.sync())
+        # Cât durează sincronizarea: trimitem paginii progresul și citim mesajele ei.
+        while not sync.done():
+            ctrl_getter = asyncio.create_task(conn.ctrl.get())
+            done, _ = await asyncio.wait({sync, ctrl_getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            if ctrl_getter in done:
+                await ws.send_text(ctrl_getter.result())
+            else:
+                ctrl_getter.cancel()
+            if receiver in done:
+                on_client(receiver.result())   # ridică WebSocketDisconnect dacă s-a închis
+                receiver = asyncio.create_task(ws.receive_text())
+        try:
+            sync.result()
+        except Exception as e:  # noqa: BLE001 - orice eroare ajunge ca mesaj în pagină
+            reason = str(e) or type(e).__name__
+            print(f"[DATASTORE] {pair.label}: {reason}")
+            while not conn.ctrl.empty():
+                await ws.send_text(conn.ctrl.get_nowait())
+            await fail(f"datastore {TF_LABELS[tf]}: {reason}", retry=True)
+            return
         try:
             # Limită de timp: dacă sursa nu răspunde, pagina primește o eroare și reîncearcă,
             # în loc să aștepte la nesfârșit.
@@ -1384,7 +1372,7 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
         if elapsed > 5:
             print(f"[WEB] istoric {SOURCES[source]} {name} {TF_LABELS[tf]}: încărcat lent ({elapsed:.1f}s)")
         hello["source"] = source
-        # Starea datastore-ului (pentru indicatorul de pe chart); sub un minut nu se salvează.
+        # Starea datastore-ului (pentru indicatorul de pe chart); „Ticuri” nu are lumânări.
         hello["store"] = dict(pair.store.status) if pair else {"state": "off"}
         # Mesajele de progres rămase sunt mai vechi decât starea din hello.
         while not conn.ctrl.empty():

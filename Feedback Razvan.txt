@@ -10,9 +10,11 @@ De decis daca implementam o baza de date.
 De implementat calendare economice. Si corelatii intre stiri si pret.
 
 
+Un algoritm de gasire de corelatii. Asset-uri legate intre ele. De exemplu granele si petrolul se misca in acelasi fel. Poate unele piete sunt corelate dar cu delay. 
+
 ANDREI :
 
-De implementat Airflow/Kafca Apa(shi)
+De implementat Airflow/Kafca Apa(shi)- Am ales QuestDB in loc.
 
 
 Pentru maine : de explicat infrastructura.
@@ -20,5 +22,3 @@ Pentru maine : de explicat infrastructura.
 Cont pe DWservice (https://access.dwservice.net/login.dw?msgerr=I1Nlc3Npb25FeHBpcmVk#s) - adresa de email/user - mesaj lui vali pentru acces la masina virtuala
 
 
-
-Un algoritm de gasire de corelatii. Asset-uri legate intre ele. De exemplu granele si petrolul se misca in acelasi fel. Poate unele piete sunt corelate dar cu delay. 

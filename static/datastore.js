@@ -9,7 +9,7 @@
 //    deschidere a unui timeframe, chartul apare după ce descărcarea se termină.
 //  - După aceea: câte lumânări are fișierul; numărul crește la fiecare lumânare închisă
 //    (lumânările noi se adaugă după cele 10.000, cele vechi nu se șterg).
-//  - Sub un minut (1s–30s) nu se salvează nimic, deci nici indicatorii nu rulează.
+//  - 1s–30s și „Ticuri”: lumânările se calculează în QuestDB din ticuri (pe „Ticuri”, una pe tic).
 //
 //  Folosește variabilele din app.js (state, $, setStatus).
 // =====================================================================================
@@ -26,7 +26,7 @@ const fmtUtc = (t) => (t ? fmtBarTime(t) : "—");
 
 // Ce face serverul acum, pe faze (vezi datastore.py).
 const PHASES = {
-  download: "Descarc", update: "Actualizez", history: "Completez istoricul", rebuild: "Refac",
+  read: "Citesc din QuestDB", download: "Descarc", update: "Actualizez", history: "Completez istoricul", rebuild: "Refac",
 };
 
 // Apelată de app.js cu starea datastore-ului (din hello sau din mesajele "store").
@@ -38,9 +38,9 @@ window.onStoreStatus = (s) => {
   const tf = tfLabel();
   let text = "", title = "", bar = null;
   if (s.state === "off") {
-    text = `${tf}: nu se salvează · fără indicatori`;
-    title = "Lumânările de 1s–30s se construiesc din ticuri și nu se salvează în datastore, " +
-      "deci indicatorii nu rulează pe ele. Alege M1 sau un timeframe mai mare.";
+    text = `${tf}: ticuri brute · fără indicatori`;
+    title = "Pe „Ticuri” graficul arată fiecare tic din QuestDB, fără lumânări, " +
+      "deci indicatorii nu rulează. Alege 1s sau un timeframe mai mare.";
   } else if (s.state === "pending") {
     text = `${tf}: verific datastore-ul…`;
   } else if (s.state === "syncing") {
@@ -61,7 +61,7 @@ window.onStoreStatus = (s) => {
     text = `${tf} · ${pct}% · ${fmtInt(s.bars)} lumânări`;
     if (pct < 100) bar = s.pct;
     title = [
-      `Datastore local (${state.source || ""}): ${s.file || ""}`,
+      `Lumânări din ${s.file || "QuestDB"}`,
       `Prima lumânare: ${fmtUtc(s.first)}`,
       `Ultima lumânare închisă: ${fmtUtc(s.last)}`,
       s.complete && s.bars < s.target
