@@ -35,17 +35,31 @@ La pornire, serverul afișează adresele:
 
 **Telefon simulat pe desktop:** în Chrome/Edge apasă `F12`, apoi `Ctrl+Shift+M` și alege un telefon din listă.
 
+## Aplicația publică (de oriunde, fără Tailscale)
+Un al doilea `server.py` rulează pe VM și e publicat prin **Tailscale Funnel** la
+**https://vm.tailnet.ts.net/**: merge din orice browser (PC sau telefon), fără nimic instalat.
+- Cere **parolă** (`APP_PASSWORD` din `.env`-ul de pe VM). După login, sesiunea ține 30 de zile; schimbarea
+  parolei delogează pe toată lumea. După 10 parole greșite de pe același IP, acel IP e blocat 15 minute.
+  Delogare: `/logout`.
+- Fără `APP_PASSWORD` în `.env` (cum e pe PC), serverul nu cere login.
+- Pe VM serverul ascultă doar pe `127.0.0.1:8000`; din afară se ajunge la el numai prin Funnel (HTTPS).
+- Task-ul „Nexus Server” îl pornește la boot (ca SYSTEM, prioritate BelowNormal, ca și colectorul);
+  jurnal în `C:\Nexus Trading\server_stdout.log`.
+- După o modificare a serverului sau a paginii: copiezi fișierele (`*.py`, `static/`) în `C:\Nexus Trading`
+  și repornești task-ul „Nexus Server”. Nu suprascrie `.env`-ul de pe VM.
+- Oprirea accesului public: pe VM, `tailscale funnel --https=443 off`.
+
 ## Mașina virtuală (QuestDB + colector)
 - Acces de pe PC: `ssh nexus-vm` (cheia `~/.ssh/nexus_vm`; configurarea SSH: `vm_setup/setup_vm_ssh.ps1`).
 - QuestDB: `C:\questdb` (date în `C:\questdb\data`), consola web pe `http://<IP-ul VM-ului în Tailscale>:9000`
   (utilizator și parolă din `.env`). Porturile 9000 / 8812 sunt deschise doar pentru Tailscale.
-- Colectorul: `C:\nexus` (`collector.py`, `tickdb.py`, `ctrader.py`, `.env`, `ctrader_token.json`), jurnal în
-  `C:\nexus\collector.log`. După o modificare: copiezi fișierele cu `scp` și repornești task-ul
+- Colectorul: `C:\Nexus Trading` (`collector.py`, `tickdb.py`, `ctrader.py`, `.env`, `ctrader_token.json`), jurnal în
+  `C:\Nexus Trading\collector.log`. După o modificare: copiezi fișierele cu `scp` și repornești task-ul
   „Nexus Collector”.
 - Tokenul cTrader al VM-ului e **separat** de orice alt token (la reînnoire, tokenul vechi devine invalid).
   Un token nou: Playground → Get token, apoi pe PC
   `$env:CTRADER_TOKEN_FILE="ctrader_token_vm.json"; python ctrader_setup.py` și copiezi fișierul pe VM ca
-  `C:\nexus\ctrader_token.json`.
+  `C:\Nexus Trading\ctrader_token.json`.
 - Tabelele: `ticks` (un rând pe tic), `tick_coverage` (zilele complete), `bars` (lumânările oficiale),
   `bar_status`, `symbols`. Interogări utile:
   ```sql

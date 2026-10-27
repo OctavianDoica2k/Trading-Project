@@ -45,6 +45,7 @@ import re
 import socket
 import sys
 import time
+import urllib.parse
 import uuid
 # ProcessPoolExecutor: procese separate pentru calculul indicatorilor; BrokenProcessPool = eroarea
 # primită când unul dintre aceste procese a murit.
@@ -60,8 +61,8 @@ from pathlib import Path
 # --- Biblioteci externe (instalate cu pip, vezi requirements.txt) ---
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -90,6 +91,7 @@ from tickdb import TickDB  # noqa: E402
 from heikin_aishi import heikin_ashi  # noqa: E402 - lumânările Heikin-Ashi de pe chart
 import fastframe  # noqa: E402 - rulează heikin_ashi() repede (vezi fastframe.py)
 from push import PushService  # noqa: E402
+from auth import COOKIE, SESSION_DAYS, Auth, login_page  # noqa: E402 - login cu parolă (APP_PASSWORD)
 
 # --- Constante de configurare ---
 # La conectare trimitem ultimele MAX_INITIAL_BARS lumânări închise din datastore (+ lumânarea în
@@ -258,6 +260,8 @@ async def use_source(source: str):
 # alerts  : alarmele de preț (fișierul alerts.json poate fi schimbat cu variabila ALERTS_FILE).
 hub = TickHub()
 alerts = AlertStore(Path(os.getenv("ALERTS_FILE", ROOT / "alerts.json")), Mailer())
+# auth    : login cu parolă, activ doar dacă .env are APP_PASSWORD (serverul de pe VM, public).
+auth = Auth(ROOT)
 # hub-ul îi spune sursei de prețuri ce simboluri să urmărească ...
 hub.on_wanted = lambda names: feed and feed.want(names, viewers=bool(hub.subs))
 # ... și întreabă alarmele ce simboluri trebuie urmărite permanent ...
@@ -315,6 +319,8 @@ async def lifespan(_app: FastAPI):
     # (`:=` atribuie și testează în același timp: ip primește rezultatul lui lan_ip().)
     if HOST == "0.0.0.0" and (ip := lan_ip()):
         print(f"[WEB] de pe telefon: http://{ip}:{PORT}  (aceeași rețea Wi-Fi)")
+    if auth.enabled:
+        print("[WEB] login cu parolă activ (APP_PASSWORD din .env)")
     if not alerts.mailer.configured:
         print("[ALERT] SMTP neconfigurat: alarmele apar în pagină, dar nu se trimit e-mailuri (vezi .env.example)")
     yield
@@ -341,6 +347,47 @@ async def no_stale_static(request, call_next):
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# Fără login valid (când APP_PASSWORD e setat): paginile duc la /login, cererile API primesc 401.
+# Conexiunea WebSocket e verificată separat, în ws_endpoint.
+@app.middleware("http")
+async def require_login(request, call_next):
+    if request.url.path == "/login" or auth.ok(request.cookies):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "neautentificat"}, status_code=401)
+    return RedirectResponse("/login", status_code=303)
+
+
+@app.get("/login")
+async def login_form():
+    return HTMLResponse(login_page(), headers={"Cache-Control": "no-cache"})
+
+
+# Formularul de login trimite password=... (application/x-www-form-urlencoded).
+@app.post("/login")
+async def login_submit(request: Request):
+    ip = auth.client_ip(request)
+    if auth.blocked(ip):
+        return HTMLResponse(login_page("Prea multe încercări greșite. Reîncearcă peste 15 minute."), status_code=429)
+    form = urllib.parse.parse_qs((await request.body()).decode("utf-8", "replace"))
+    if not auth.check(ip, form.get("password", [""])[0]):
+        await asyncio.sleep(1)   # încetinește ghicirea parolei
+        print(f"[WEB] parolă greșită de la {ip}")
+        return HTMLResponse(login_page("Parolă greșită."), status_code=401)
+    response = RedirectResponse("/", status_code=303)
+    secure = request.headers.get("x-forwarded-proto") == "https" or request.url.scheme == "https"
+    response.set_cookie(COOKIE, auth.new_session(), max_age=SESSION_DAYS * 86400,
+                        httponly=True, samesite="lax", secure=secure)
+    return response
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(COOKIE)
     return response
 
 
@@ -1251,6 +1298,10 @@ def mtf_unwatch(source: str, name: str, conn: Conn):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
     await ws.accept()
+    # Fără login valid: codul 4401 îi spune paginii să meargă la /login (app.js).
+    if not auth.ok(ws.cookies):
+        await ws.close(code=4401)
+        return
     if tf not in TIMEFRAMES:
         tf = 1
 

@@ -128,6 +128,25 @@ BAR_DELAY = 2
 log = logging.getLogger("collector")
 
 
+# Punctul 10: QuestDB (java din folderul de deasupra lui DATA_DIR) primește prioritatea
+# QUESTDB_PRIORITY, dacă n-o are deja. Doar pe Windows.
+def lower_questdb_priority():
+    if os.name != "nt" or not QUESTDB_PRIORITY:
+        return
+    home = str(Path(DATA_DIR).parent).rstrip("\\") + "\\*"
+    cmd = (f"Get-Process java -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{home}' -and "
+           f"$_.PriorityClass -ne '{QUESTDB_PRIORITY}' }} | ForEach-Object {{ "
+           f"$_.PriorityClass = '{QUESTDB_PRIORITY}'; $_.Id }}")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True,
+                             text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.info(f"[CPU] prioritatea QuestDB nu s-a putut schimba: {type(e).__name__}: {e}")
+        return
+    if out:
+        log.info(f"[CPU] QuestDB (PID {out}) rulează acum cu prioritatea {QUESTDB_PRIORITY}")
+
+
 def setup_logging():
     fmt = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
     file = RotatingFileHandler(ROOT / "collector.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
@@ -492,7 +511,11 @@ class Collector:
 
     # Punctul 9: o dată pe minut, dacă QuestDB chiar aplică ce scriem; plus starea (punctul 8).
     async def monitor(self):
+        priority_at = 0.0
         while True:
+            if time.monotonic() - priority_at >= PRIORITY_EVERY:
+                priority_at = time.monotonic()
+                await asyncio.to_thread(lower_questdb_priority)
             await asyncio.sleep(HEARTBEAT)
             try:
                 problems = await asyncio.to_thread(self.db.wal_problems)

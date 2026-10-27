@@ -619,7 +619,9 @@ function connect() {
   };
   // Conexiunea a căzut (server oprit, internet întrerupt): reîncercăm cu pauze tot mai mari –
   // 1s, 2s, 4s, 8s, apoi maximum 10s – ca să nu bombardăm serverul.
-  sock.onclose = () => {
+  sock.onclose = (e) => {
+    // 4401 = sesiunea de login lipsește sau a expirat (serverul public, cu parolă).
+    if (e.code === 4401) { location.href = "/login"; return; }
     setStatus(false, `${sock.errorMsg || "deconectat"} — reîncerc`);
     retryTimer = setTimeout(connect, Math.min(1000 * 2 ** retry++, 10000));
   };
