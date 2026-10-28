@@ -38,7 +38,7 @@ function buildTrendWidget() {
   const w = document.createElement("div");
   w.className = "indwidget";
   w.innerHTML = `
-    <span class="indname" title="Linii de trend (analysis.py)">📈 Trend</span>
+    <span class="indname" title="Linii de trend (analysis.py)">Trend</span>
     <input type="range" min="0" max="100" step="1" aria-label="Apropierea liniilor de trend de prețul curent"
       title="Arată liniile de trend apropiate de prețul curent (100% = toate)">
     <label class="indpct" title="Scrie procentul (0–100)"><input type="number" min="0" max="100" step="1"
@@ -179,7 +179,8 @@ function onTrendResult(msg) {
 registerIndicator({
   id: "trend",
   name: "Linii de trend",
-  icon: "📈",
+  iconHTML: '<svg class="ico" viewBox="0 0 16 16"><path d="M2 12.5l12-6"/><path d="M2 8.5l12-6" opacity=".45"/><circle cx="5" cy="11" r="1.2"/><circle cx="11" cy="8" r="1.2"/></svg>',
+  icon: "TL",
   desc: `Drepte valide prin maxime și minime — rulează analysis.py pe ultimele ${TREND_BARS} de lumânări închise din datastore`,
   note: `Se calculează pe server, din datastore-ul local, pe ultimele ${TREND_BARS} de lumânări închise ` +
     "ale timeframe-ului curent, și se recalculează la fiecare lumânare închisă. Sliderul din dreapta sus " +

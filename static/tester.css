@@ -1,0 +1,328 @@
+/* ==================================================================================== */
+/* Strategy Tester: aceeași paletă ca pagina principală (style.css), pe carduri.         */
+/* ==================================================================================== */
+:root {
+  --bg: #0f1218;
+  --panel: #161b24;
+  --card: #141922;
+  --raised: #1b2130;
+  --border: #252c38;
+  --border-soft: #1e2430;
+  --text: #d6dbe4;
+  --muted: #7d8696;
+  --faint: #566070;
+  --up: #26a69a;
+  --down: #ef5350;
+  --accent: #4c8dff;
+  --accent-soft: rgba(76, 141, 255, .14);
+  --bal: #4c8dff;
+  --eq: #26a69a;
+  --load: #b07cff;
+  --radius: 10px;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+code { font: 11.5px ui-monospace, Consolas, monospace; color: #9fb0c8; }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* ---------- Câmpuri și butoane ---------- */
+input, select, button { font: inherit; color: var(--text); }
+input, select {
+  height: 34px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 0 10px;
+  min-width: 0; width: 100%; transition: border-color .15s, box-shadow .15s;
+}
+select { padding-right: 6px; cursor: pointer; }
+input:hover, select:hover { border-color: #323b4b; }
+input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input:disabled, select:disabled { opacity: .5; cursor: default; }
+input[type="date"] { color-scheme: dark; }
+.btn {
+  height: 32px; padding: 0 14px; border-radius: 7px; cursor: pointer; white-space: nowrap;
+  background: var(--raised); border: 1px solid var(--border); transition: border-color .15s, background .15s;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.ghost { background: transparent; }
+.join { display: flex; }
+.join > :first-child { border-radius: 7px 0 0 7px; }
+.join > :last-child { border-radius: 0 7px 7px 0; margin-left: -1px; }
+.join > select:last-child { width: auto; min-width: 92px; }
+.static { min-height: 34px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+
+/* ---------- Bara de titlu (doar ca pagină; în fereastră titlul e al ferestrei) ---------- */
+.brand { display: flex; align-items: center; gap: 14px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.brand h1 { font-size: 15px; margin: 0; }
+.brand .back { color: var(--accent); text-decoration: none; }
+.chip { color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+body.embed .brand { display: none; }
+
+/* ---------- Tab-uri + Start ---------- */
+.toolbar {
+  display: flex; align-items: center; gap: 12px; padding: 0 14px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.tab {
+  display: inline-flex; align-items: center; gap: 7px; height: 44px; padding: 0 12px;
+  background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab.active svg { color: var(--accent); }
+.badge { background: var(--raised); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 0 7px; font-size: 11px; line-height: 17px; }
+.runbox { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.runinfo { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.runinfo .bar { width: 160px; height: 6px; background: var(--raised); border-radius: 99px; overflow: hidden; }
+.runinfo .bar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #7aa9ff); border-radius: 99px; transition: width .35s; }
+.start {
+  display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 20px 0 16px;
+  background: #238636; border: 1px solid #2ea043; border-radius: 7px; font-weight: 600; cursor: pointer;
+  transition: background .15s;
+}
+.start svg { fill: currentColor; stroke: none; width: 12px; height: 12px; }
+.start:hover { background: #2ea043; }
+.start.stop { background: #b62324; border-color: #da3633; }
+.start.stop:hover { background: #da3633; }
+
+/* ---------- Conținut ---------- */
+main { flex: 1; min-height: 0; overflow: auto; scroll-behavior: smooth; }
+.pane { display: none; padding: 18px; max-width: 1180px; margin: 0 auto; }
+.pane.active { display: block; animation: fade .18s ease-out; }
+@keyframes fade { from { opacity: 0; transform: translateY(3px); } }
+.card { background: var(--card); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 16px 18px; }
+.card.flush { padding: 0; overflow: hidden; }
+.card h3 { margin: 0 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.cardhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.cardhead h3 { margin: 0; }
+.cardhead.pad { padding: 12px 16px; margin: 0; border-bottom: 1px solid var(--border-soft); }
+.hint { color: var(--muted); margin: 10px 0 0; font-size: 12.5px; }
+.foot { color: var(--faint); font-size: 12px; margin: 14px 2px 0; }
+
+/* ---------- Setări ---------- */
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.wide { grid-column: 1 / -1; }
+.field { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 10px; }
+.field:first-of-type { margin-top: 0; }
+.field > label { color: var(--muted); }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 14px; margin-top: 14px; }
+.row3 .field { grid-template-columns: 1fr; gap: 6px; margin: 0; }
+.seg { display: flex; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 3px; gap: 2px; }
+.seg button {
+  flex: 1; height: 26px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer;
+  font-size: 12.5px; font-weight: 500; transition: background .15s, color .15s;
+}
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--raised); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .4), inset 0 0 0 1px var(--border); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button {
+  height: 28px; padding: 0 12px; border-radius: 999px; background: transparent; border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer; font-size: 12.5px; transition: all .15s;
+}
+.chips button:hover { color: var(--text); border-color: #3a4456; }
+.chips button.on { color: var(--text); background: var(--accent-soft); border-color: var(--accent); }
+.chips.small button { height: 26px; padding: 0 10px; font-size: 12px; }
+/* Cronologia cu slider: bara (rail), perioada (sel + forward), mânerele, etichetele cu datele și lunile. */
+.timeline { margin-top: 14px; padding-top: 30px; user-select: none; -webkit-user-select: none; }
+.range { position: relative; height: 22px; margin: 0 6px; touch-action: none; cursor: pointer; }
+.range .rail {
+  position: absolute; left: -6px; right: -6px; top: 6px; height: 10px; overflow: hidden;
+  background: var(--raised); border-radius: 99px; box-shadow: inset 0 1px 2px rgba(0, 0, 0, .35);
+}
+.range .lane { position: absolute; inset: 0 6px; }   /* aceeași lățime ca .range, deci aceleași procente */
+.range .marks { position: absolute; inset: 0; }
+.range .marks i { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, .05); }
+.range .marks i.y { background: rgba(255, 255, 255, .13); }
+.range .sel, .range .fwd { position: absolute; top: 0; bottom: 0; }
+.range .sel { background: linear-gradient(90deg, rgba(76, 141, 255, .55), rgba(76, 141, 255, .85)); transition: left .2s ease, right .2s ease, filter .15s; }
+.range .fwd { transition: left .2s ease, right .2s ease;
+  background: repeating-linear-gradient(135deg, rgba(176, 124, 255, .9) 0 4px, rgba(176, 124, 255, .45) 4px 8px); }
+.range:has(.body:hover) .sel, .range.drag-body .sel { filter: brightness(1.2); }
+.range .body { position: absolute; top: 0; bottom: 0; cursor: grab; transition: left .2s ease, right .2s ease; }
+.range .knob {
+  position: absolute; top: 0; z-index: 2; width: 12px; height: 22px; margin-left: -6px; border-radius: 4px; outline: none;
+  cursor: ew-resize; background: linear-gradient(#f4f6fa, #c9d1de);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .55), 0 0 0 1px rgba(0, 0, 0, .3);
+  transition: left .2s ease, box-shadow .15s, transform .15s;
+}
+.range .knob::before {   /* striații de prindere */
+  content: ""; position: absolute; left: 3.5px; right: 3.5px; top: 7px; bottom: 7px;
+  border-left: 1px solid #8792a4; border-right: 1px solid #8792a4;
+}
+.range .knob::after { content: ""; position: absolute; inset: -6px -7px; }   /* zonă de prindere mai mare */
+.range .knob:hover, .range .knob.active { box-shadow: 0 1px 3px rgba(0, 0, 0, .55), 0 0 0 1px rgba(0, 0, 0, .3), 0 0 0 5px var(--accent-soft); }
+.range .knob.active { transform: scaleY(1.08); }
+.range .knob:focus-visible { box-shadow: 0 1px 3px rgba(0, 0, 0, .55), 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+.range .tip {
+  position: absolute; bottom: calc(100% + 8px); left: 0; padding: 2px 8px; border-radius: 6px; pointer-events: none;
+  background: var(--raised); border: 1px solid var(--border); color: var(--text); white-space: nowrap;
+  font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 12px rgba(0, 0, 0, .35);
+  transition: left .2s ease, opacity .15s, border-color .15s;
+}
+.range .tip::after {   /* săgeata spre mâner; --ax = poziția ei în etichetă */
+  content: ""; position: absolute; top: 100%; left: var(--ax, 50%); margin-left: -4px;
+  border: 4px solid transparent; border-top-color: var(--border);
+}
+.range .tip.off { opacity: 0; }
+.range .tip.hot { border-color: var(--accent); }
+.range .tip.hot::after { border-top-color: var(--accent); }
+.range.dragging, .range.dragging * { transition: none !important; }
+.range.drag-body, .range.drag-body * { cursor: grabbing !important; }
+.range.drag-knob, .range.drag-knob * { cursor: ew-resize !important; }
+.range.nodata > :not(.rail) { display: none; }
+.ticks { position: relative; height: 15px; margin: 5px 6px 0; font-size: 11px; color: var(--faint); }
+.ticks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.ticks span.y { color: var(--muted); font-weight: 600; }
+.tlabels { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.mode {
+  position: relative; text-align: left; padding: 12px 14px 12px 40px; border-radius: 9px; cursor: pointer;
+  background: var(--bg); border: 1px solid var(--border); transition: border-color .15s, background .15s;
+}
+.mode:hover { border-color: #3a4456; }
+.mode::before { content: ""; position: absolute; left: 14px; top: 15px; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #4a5568; }
+.mode.on { border-color: var(--accent); background: linear-gradient(180deg, rgba(76, 141, 255, .08), transparent); }
+.mode.on::before { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 3.5px, transparent 4px); }
+.mode b { display: block; font-weight: 600; margin-bottom: 4px; }
+.mode p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.meters { display: flex; gap: 14px; margin-top: 10px; font-size: 11px; color: var(--faint); }
+.meters i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #2c3442; margin-left: 3px; }
+.meters i.on { background: var(--accent); }
+
+/* ---------- Parametri ---------- */
+table.inputs { border-collapse: collapse; width: 100%; }
+.inputs th, .inputs td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-soft); }
+.inputs th { color: var(--faint); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
+.inputs td:nth-child(2) { width: 190px; }
+.inputs td code { margin-left: 6px; color: var(--faint); }
+.inputs tr.grp td { padding-top: 16px; font-weight: 600; color: var(--text); border-bottom-color: var(--border); }
+.inputs tr.off td { color: var(--muted); }
+.inputs .def { width: 120px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.inputs tr.changed td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.inputs tr.changed input, .inputs tr.changed select { border-color: rgba(76, 141, 255, .6); }
+
+/* ---------- KPI-uri ---------- */
+.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.kpis:empty { display: none; }
+.kpi { background: var(--card); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 12px 14px; }
+.kpi span { display: block; color: var(--muted); font-size: 11.5px; }
+.kpi b { display: block; font-size: 19px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.kpi small { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.pos { color: var(--up) !important; }
+.neg { color: var(--down) !important; }
+
+/* ---------- Grafic ---------- */
+.graphcard { padding: 12px 14px 8px; }
+.legend { display: flex; gap: 4px; flex-wrap: wrap; }
+.lg { display: inline-flex; align-items: center; gap: 7px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; color: var(--text); cursor: pointer; font-size: 12.5px; }
+.lg:hover { border-color: var(--border); }
+.lg:not(.on) { opacity: .4; }
+.lg i { width: 14px; height: 3px; border-radius: 2px; }
+.c-bal { background: var(--bal); }
+.c-eq { background: var(--eq); }
+.c-load { background: var(--load); height: 9px !important; width: 9px !important; }
+.graphwrap { position: relative; height: max(320px, calc(100vh - 290px)); }
+body:not(.embed) .graphwrap { height: max(320px, calc(100vh - 340px)); }
+#gCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+.gtip {
+  position: absolute; pointer-events: none; min-width: 170px; padding: 8px 10px; font-size: 12px;
+  background: rgba(22, 27, 36, .96); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+}
+.gtip .t { color: var(--muted); margin-bottom: 4px; }
+.gtip div { display: flex; justify-content: space-between; gap: 16px; font-variant-numeric: tabular-nums; }
+
+/* ---------- Raport ---------- */
+.summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: -2px 2px 14px; color: var(--muted); font-size: 12.5px; }
+.summary b { color: var(--text); font-weight: 500; }
+.rgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+.rgrid:empty { display: none; }
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+.kv:last-child { border-bottom: 0; padding-bottom: 0; }
+.kv .k { color: var(--muted); }
+.kv .v { font-variant-numeric: tabular-nums; text-align: right; }
+.kv .v small { color: var(--faint); margin-left: 4px; }
+.verify { margin-top: 14px; }
+.vrow { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+.vrow label { color: var(--muted); }
+.vrow input { width: 90px; }
+.vres { margin-top: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid; }
+.vres.ok { border-color: rgba(38, 166, 154, .4); background: rgba(38, 166, 154, .08); color: #6fd3c8; }
+.vres.bad { border-color: rgba(239, 83, 80, .4); background: rgba(239, 83, 80, .08); color: #ff8a87; }
+table.mini { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.mini th, .mini td { padding: 6px 10px; border-bottom: 1px solid var(--border-soft); text-align: left; }
+.mini th { color: var(--faint); font-weight: 500; }
+
+/* ---------- Tranzacții ---------- */
+.dealbar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+.dealbar .btn { margin-left: auto; }
+.tablewrap { overflow: auto; max-height: calc(100vh - 230px); }
+table.deals { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.deals th, .deals td { padding: 7px 12px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; text-align: left; }
+.deals th { position: sticky; top: 0; z-index: 1; background: var(--raised); color: var(--muted); font-weight: 500; font-size: 11.5px; }
+.deals .r { text-align: right; }
+.deals tbody tr:hover td { background: rgba(255, 255, 255, .025); }
+.deals tr.bal td { color: var(--muted); }
+.pill { display: inline-block; padding: 0 8px; border-radius: 99px; font-size: 11.5px; line-height: 19px; font-weight: 500; }
+.pill.buy { background: rgba(76, 141, 255, .15); color: #8fb6ff; }
+.pill.sell { background: rgba(239, 83, 80, .14); color: #ff8a87; }
+.dir { color: var(--faint); }
+.deals .cm { color: var(--muted); }
+
+/* ---------- Jurnal ---------- */
+.journal { padding: 12px 16px; font: 12px/1.7 ui-monospace, Consolas, monospace; white-space: pre-wrap; max-height: calc(100vh - 210px); overflow: auto; }
+.journal .t { color: var(--faint); margin-right: 10px; }
+.journal .e { color: var(--down); }
+
+/* ---------- Stări goale și mesaje ---------- */
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 70px 20px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); }
+.empty svg { width: 30px; height: 30px; color: var(--faint); margin-bottom: 6px; }
+.empty p { margin: 0; font-weight: 600; }
+body.has-result .empty { display: none; }
+body:not(.has-result) .graphcard, body:not(.has-result) #tab-deals .card, body:not(.has-result) .dealbar { display: none; }
+.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+.toast {
+  max-width: 380px; padding: 10px 14px; border-radius: 9px; background: var(--raised); border: 1px solid var(--border);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45); animation: fade .2s ease-out;
+}
+.toast.err { border-color: rgba(239, 83, 80, .55); }
+.toast.ok { border-color: rgba(38, 166, 154, .55); }
+
+/* ---------- Ecrane mici ---------- */
+@media (max-width: 1000px) {
+  .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .modes { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .pane { padding: 12px; }
+  .grid, .row3 { grid-template-columns: 1fr; }
+  .field { grid-template-columns: 1fr; gap: 6px; }
+  .toolbar { flex-wrap: wrap; padding: 0 8px; gap: 0; }
+  .tabs { width: 100%; }
+  .tab { padding: 0 10px; height: 40px; }
+  .tab svg { display: none; }
+  .runbox { width: 100%; padding: 8px 4px; justify-content: flex-end; }
+  .runinfo { flex: 1; }
+  .runinfo .bar { flex: 1; width: auto; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inputs td code, .inputs .def { display: none; }
+  .inputs td:nth-child(2) { width: 130px; }
+  input, select { font-size: 16px; }
+  .rgrid { grid-template-columns: 1fr; }
+}
+
+/* ---------- Barele de derulare: subțiri, închise la culoare, fără săgeți ---------- */
+* { scrollbar-width: thin; scrollbar-color: #2e3646 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: #3a4456; }
+::-webkit-scrollbar-corner, ::-webkit-scrollbar-button { display: none; }

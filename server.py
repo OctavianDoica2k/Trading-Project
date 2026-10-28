@@ -83,6 +83,7 @@ load_dotenv(ROOT / ".env")
 # și sursa de prețuri, QuestDB de pe VM (questfeed.py, tickdb.py).
 import indicators as calc  # noqa: E402 - calculul indicatorilor (în procese separate)
 import mtf  # noqa: E402 - zilele din datastore pentru „Trend multi-timeframe”
+import backtester  # noqa: E402 - Strategy Tester (rulează în procesul lui, vezi /api/tester)
 from alerts import AlertStore, Mailer, valid_email  # noqa: E402 - după load_dotenv
 from ctrader import PERIODS, CTraderError  # noqa: E402 - timeframe-urile și erorile sursei
 from datastore import Datastore  # noqa: E402 - lumânările închise, din QuestDB
@@ -330,6 +331,10 @@ async def lifespan(_app: FastAPI):
     await asyncio.gather(*tasks, return_exceptions=True)
     if pool:
         pool.shutdown(wait=False, cancel_futures=True)
+    if tester_pool:
+        tester_pool.shutdown(wait=False, cancel_futures=True)
+    if tester_mgr:
+        tester_mgr.shutdown()
 
 
 # Aplicația web propriu-zisă.
@@ -588,7 +593,7 @@ async def push_test(p: PushEndpointIn):
     # asyncio.to_thread rulează trimiterea (care așteaptă răspunsul unui server extern) într-un
     # fir separat, ca serverul web să rămână liber pentru celelalte cereri între timp.
     ok = await asyncio.to_thread(push.send, p.endpoint, {
-        "title": "🔔 Nexus: notificare de test",
+        "title": "Nexus: notificare de test",
         "body": "Notificările push funcționează pe acest dispozitiv.",
         "tag": "nexus-test", "url": "/",
     })
@@ -1462,6 +1467,115 @@ async def ws_endpoint(ws: WebSocket, symbol: str = "EURUSD", tf: int = 1):
         mtf_unwatch(source, name, conn)
         if pair:
             leave_pair(pair, conn)
+
+
+# ---------- Strategy Tester (pagina /tester) ----------
+# Backtest-ul strategiei din strategy.py (backtester.py) rulează într-un proces separat, câte unul
+# odată; pagina îl pornește, apoi întreabă periodic progresul și, la final, primește raportul.
+TESTS: dict[str, dict] = {}
+tester_pool: ProcessPoolExecutor | None = None
+tester_mgr = None
+
+
+class TestIn(BaseModel):
+    kind: str = "run"          # "run" = backtest, "verify" = compară copia rapidă cu strategy.py
+    settings: dict
+    inputs: dict
+    samples: int = 10
+
+
+@app.get("/tester")
+async def tester_page():
+    html = (STATIC / "tester.html").read_text(encoding="utf-8")
+    html = re.sub(r'"/static/([\w.-]+\.(?:js|css))"', versioned, html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+# Ce se poate testa: simbolurile cu specificație în backtester.py, timeframe-urile, modurile și
+# perioada cu ticuri complete în QuestDB pentru fiecare simbol.
+@app.get("/api/tester/info")
+async def tester_info():
+    def coverage():
+        rows = feed.db.query(f"SELECT symbol, min(day), max(day) FROM tick_coverage WHERE source = '{PRICE_SOURCE}' "
+                             "AND status = 'complete' GROUP BY symbol")
+        return {r[0]: {"first": r[1][:10], "last": r[2][:10]} for r in rows}
+    try:
+        cov = await asyncio.to_thread(coverage)
+    except Exception as e:  # noqa: BLE001 - pagina afișează eroarea
+        raise HTTPException(503, f"QuestDB indisponibil: {e}") from e
+    return {"symbols": [s for s in backtester.SYMBOLS if s in cov], "coverage": cov,
+            "tfs": list(backtester.TFS), "modes": backtester.MODES, "currencies": backtester.CURRENCIES,
+            "running": next((j["id"] for j in TESTS.values() if j["status"] == "running"), None)}
+
+
+@app.post("/api/tester/run")
+async def tester_run(body: TestIn):
+    global tester_pool, tester_mgr
+    if any(j["status"] == "running" for j in TESTS.values()):
+        raise HTTPException(409, "Un test rulează deja")
+    if body.kind not in ("run", "verify"):
+        raise HTTPException(400, "Tip necunoscut")
+    if tester_mgr is None:
+        import multiprocessing
+        tester_mgr = multiprocessing.Manager()
+    if tester_pool is None:
+        tester_pool = ProcessPoolExecutor(max_workers=1)
+    shared = tester_mgr.dict({"phase": "start", "progress": 0.0, "log": [], "cancel": False})
+    job = {"id": uuid.uuid4().hex[:12], "kind": body.kind, "status": "running", "error": "", "result": None,
+           "started": time.time(), "shared": shared}
+    TESTS[job["id"]] = job
+    # Păstrăm doar ultimele 5 teste (rezultatele pot fi mari).
+    for old in list(TESTS)[:-5]:
+        if TESTS[old]["status"] != "running":
+            TESTS.pop(old)
+
+    async def runner():
+        global tester_pool
+        try:
+            job["result"] = await asyncio.get_running_loop().run_in_executor(
+                tester_pool, backtester.job, body.kind, body.settings, body.inputs, body.samples, shared)
+            job["status"] = "done"
+        except BrokenProcessPool:
+            tester_pool = None
+            job["status"], job["error"] = "error", "procesul testerului s-a oprit (memorie insuficientă?)"
+        except Exception as e:  # noqa: BLE001 - pagina primește eroarea ca text
+            cancelled = type(e).__name__ == "Cancelled"
+            job["status"] = "cancelled" if cancelled else "error"
+            job["error"] = "oprit" if cancelled else f"{type(e).__name__}: {e}"
+    asyncio.create_task(runner())
+    return tester_status_of(job)
+
+
+def tester_status_of(job: dict, with_result: bool = False) -> dict:
+    shared = job["shared"]
+    try:
+        live = dict(shared)
+    except Exception:  # noqa: BLE001 - managerul s-a oprit
+        live = {"phase": "", "progress": 0, "log": []}
+    out = {"id": job["id"], "kind": job["kind"], "status": job["status"], "error": job["error"],
+           "phase": live.get("phase"), "progress": live.get("progress"), "log": live.get("log", []),
+           "elapsed": round(time.time() - job["started"], 1)}
+    if with_result and job["status"] == "done":
+        out["result"] = job["result"]
+    return out
+
+
+@app.get("/api/tester/{job_id}")
+async def tester_status(job_id: str, result: bool = False):
+    job = TESTS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Testul nu există (serverul a fost repornit?)")
+    return tester_status_of(job, result)
+
+
+@app.post("/api/tester/{job_id}/stop")
+async def tester_stop(job_id: str):
+    job = TESTS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Testul nu există")
+    if job["status"] == "running":
+        job["shared"]["cancel"] = True
+    return tester_status_of(job)
 
 
 # Punctul de pornire când rulezi `python server.py`.

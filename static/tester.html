@@ -1,0 +1,201 @@
+<!doctype html>
+<!-- ================================================================================== -->
+<!-- Strategy Tester: backtest-ul strategiei din strategy.py, ca în MetaTrader 5.          -->
+<!-- Se deschide în fereastra de peste chart (testerwin.js, cu ?embed=1) sau ca pagină.    -->
+<!-- Tab-urile: Setări, Parametri, Grafic, Backtest, Tranzacții, Jurnal (tester.js).       -->
+<!-- ================================================================================== -->
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus Strategy Tester</title>
+<link rel="stylesheet" href="/static/tester.css">
+</head>
+<body>
+<!-- Bara de titlu, doar când testerul e deschis ca pagină (în fereastră, titlul e al ferestrei). -->
+<header class="brand">
+  <a href="/" class="back">← Chart</a>
+  <h1>Strategy Tester</h1>
+  <span class="chip">Nexus MA Trend · strategy.py</span>
+</header>
+
+<!-- Tab-urile (stânga) și pornirea testului (dreapta). -->
+<div class="toolbar">
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="settings" role="tab"><svg viewBox="0 0 16 16"><path d="M2 4h7M12 4h2M2 12h2M7 12h7"/><circle cx="10.5" cy="4" r="1.6"/><circle cx="5.5" cy="12" r="1.6"/></svg>Setări</button>
+    <button class="tab" data-tab="inputs" role="tab"><svg viewBox="0 0 16 16"><path d="M3 3h10M3 8h10M3 13h6"/></svg>Parametri<span id="inputsBadge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="graph" role="tab"><svg viewBox="0 0 16 16"><path d="M2 13l4-5 3 3 5-7"/></svg>Grafic</button>
+    <button class="tab" data-tab="report" role="tab"><svg viewBox="0 0 16 16"><path d="M3 14V8M8 14V3M13 14v-4"/></svg>Backtest</button>
+    <button class="tab" data-tab="deals" role="tab"><svg viewBox="0 0 16 16"><path d="M2 5h10l-2-2M14 11H4l2 2"/></svg>Tranzacții<span id="dealsBadge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="journal" role="tab"><svg viewBox="0 0 16 16"><path d="M4 2h8v12H4zM6.5 5.5h3M6.5 8h3M6.5 10.5h2"/></svg>Jurnal</button>
+  </nav>
+  <div class="runbox">
+    <div id="runInfo" class="runinfo" hidden>
+      <span id="runPhase"></span>
+      <div class="bar"><div id="runBar"></div></div>
+      <span id="runPct" class="num"></span>
+    </div>
+    <button id="tStart" class="start"><svg viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z"/></svg><span>Start</span></button>
+  </div>
+</div>
+
+<main>
+  <!-- ===== Setări (Settings din MT5) ===== -->
+  <section id="tab-settings" class="pane active">
+    <div class="grid">
+      <section class="card">
+        <h3>Piață</h3>
+        <div class="field"><label>Strategie</label>
+          <div class="static">Nexus MA Trend <span class="muted">· strategy.py (copia rapidă din strategy_fast.py)</span></div></div>
+        <div class="field"><label for="sSymbol">Simbol</label><select id="sSymbol"></select></div>
+        <div class="field"><label>Timeframe</label><div id="sTf" class="seg" role="radiogroup"></div></div>
+      </section>
+
+      <section class="card">
+        <h3>Cont</h3>
+        <div class="field"><label for="sDeposit">Depozit</label>
+          <div class="join"><input id="sDeposit" type="number" min="1" step="any" list="deposits" inputmode="decimal"><select id="sCurrency"></select></div></div>
+        <datalist id="deposits"><option>100</option><option>500</option><option>1000</option><option>3000</option>
+          <option>5000</option><option>10000</option><option>50000</option><option>100000</option></datalist>
+        <div class="field"><label for="sLeverage">Levier</label><select id="sLeverage"></select></div>
+        <div class="field"><label>Execuție</label>
+          <div class="static">Fără întârzieri <span class="muted">· fără comision și swap · stop out 50%</span></div></div>
+      </section>
+
+      <section class="card wide">
+        <h3>Perioadă</h3>
+        <div id="sPresets" class="chips">
+          <button data-p="m1">1 lună</button><button data-p="m3">3 luni</button><button data-p="m6">6 luni</button>
+          <button data-p="y1">1 an</button><button data-p="all">Tot istoricul</button><button data-p="custom">Personalizat</button>
+        </div>
+        <div class="row3">
+          <div class="field"><label for="sStart">De la</label><input id="sStart" type="date"></div>
+          <div class="field"><label for="sEnd">Până la <span class="muted">(exclus)</span></label><input id="sEnd" type="date"></div>
+          <div class="field"><label for="sForward">Forward</label>
+            <div class="join"><select id="sForward">
+              <option value="0">Nu</option><option value="2">1/2</option><option value="3">1/3</option>
+              <option value="4">1/4</option><option value="custom">Personalizat</option></select>
+              <input id="sForwardDate" type="date" disabled></div></div>
+        </div>
+        <!-- Cronologia: datele disponibile în QuestDB, perioada aleasă și partea de forward.
+             Slider: mânerele schimbă start / final, perioada trasă de mijloc se mută întreagă. -->
+        <div class="timeline">
+          <div id="tlRange" class="range">
+            <div class="rail"><div class="lane"><div id="tlMarks" class="marks"></div><div id="tlSel" class="sel"></div><div id="tlFwd" class="fwd"></div></div></div>
+            <div id="tlBody" class="body" title="Trage pentru a muta perioada"></div>
+            <div id="tlA" class="knob" data-k="a" role="slider" tabindex="0" aria-label="Data de start"></div>
+            <div id="tlB" class="knob" data-k="b" role="slider" tabindex="0" aria-label="Data de final (exclusă)"></div>
+            <span id="tlTipA" class="tip"></span><span id="tlTipB" class="tip"></span><span id="tlTipM" class="tip off"></span>
+          </div>
+          <div id="tlTicks" class="ticks"></div>
+          <div class="tlabels"><span id="tlFirst"></span><span id="tlInfo" class="muted"></span><span id="tlLast"></span></div>
+        </div>
+        <p id="sPeriodHint" class="hint"></p>
+      </section>
+
+      <section class="card wide">
+        <h3>Modelling</h3>
+        <div id="sMode" class="modes" role="radiogroup"></div>
+      </section>
+    </div>
+    <p class="foot">Orele sunt în UTC. Testul începe la 00:00 în data de start și se oprește la 00:00 în data de final, ca în MT5.
+      Ticurile vin din QuestDB și se păstrează pe disc (<code>tester_cache/</code>): prima rulare pe o perioadă nouă descarcă
+      ~20 s pe lună, următoarele durează secunde.</p>
+  </section>
+
+  <!-- ===== Parametri (Inputs din MT5, ca în Nexus_MATrend_EA.mq5) ===== -->
+  <section id="tab-inputs" class="pane">
+    <section class="card">
+      <div class="cardhead"><h3>Parametrii strategiei</h3>
+        <button type="button" id="iReset" class="btn ghost">Valorile implicite</button></div>
+      <table class="inputs">
+        <thead><tr><th>Variabilă</th><th>Valoare</th><th class="def">Implicit</th></tr></thead>
+        <tbody>
+          <tr class="grp"><td colspan="3">Medie mobilă</td></tr>
+          <tr data-k="ma_period"><td>Perioada MA <code>InpMAPeriod</code></td><td><input id="iPeriod" type="number" min="1" step="1"></td><td class="def">50</td></tr>
+          <tr class="off"><td>Tipul MA <code>InpMAMethod</code></td><td><span class="static">Simple</span></td><td class="def">doar Simple</td></tr>
+          <tr data-k="ma_price"><td>Prețul pe care se calculează MA <code>InpMAPrice</code></td><td><select id="iPrice">
+            <option value="close">Close price</option><option value="open">Open price</option>
+            <option value="high">High price</option><option value="low">Low price</option>
+            <option value="median">Median price</option><option value="typical">Typical price</option>
+            <option value="weighted">Weighted price</option></select></td><td class="def">Close price</td></tr>
+          <tr class="grp"><td colspan="3">Linii de trend</td></tr>
+          <tr data-k="tl_bars"><td>Lumânări închise din urmă analizate <code>InpTLBars</code></td><td><input id="iBars" type="number" min="10" step="1"></td><td class="def">1000</td></tr>
+          <tr class="grp"><td colspan="3">Ieșiri</td></tr>
+          <tr data-k="rr"><td>Raport risc/câștig (TP = RR × distanța până la SL) <code>InpRR</code></td><td><input id="iRR" type="number" min="0.1" step="0.1"></td><td class="def">2.0</td></tr>
+          <tr data-k="close_on_ma"><td>Închide poziția când prețul se închide de partea cealaltă a MA <code>InpCloseOnMA</code></td><td><select id="iCloseMA"><option value="true">true</option><option value="false">false</option></select></td><td class="def">true</td></tr>
+          <tr class="grp"><td colspan="3">Risc</td></tr>
+          <tr data-k="risk_pct"><td>Risc pe tranzacție, % din balanță <code>InpRiskPct</code></td><td><input id="iRisk" type="number" min="0.01" step="0.1"></td><td class="def">1.0</td></tr>
+          <tr data-k="magic"><td>Magic number <code>InpMagic</code></td><td><input id="iMagic" type="number" step="1"></td><td class="def">20261026</td></tr>
+        </tbody>
+      </table>
+      <p class="hint">Aceiași parametri ca EA-ul <code>Nexus_MATrend_EA.mq5</code>, fără tipul MA (aici doar Simple, ca
+        <code>medie_mobila</code>) și fără desenarea liniilor. Valorile modificate sunt marcate cu albastru.</p>
+    </section>
+  </section>
+
+  <!-- ===== Grafic ===== -->
+  <section id="tab-graph" class="pane">
+    <div class="kpis" data-kpis></div>
+    <section class="card graphcard">
+      <div class="cardhead">
+        <div class="legend">
+          <button class="lg on" data-s="bal"><i class="c-bal"></i>Balanță</button>
+          <button class="lg on" data-s="eq"><i class="c-eq"></i>Equity</button>
+          <button class="lg on" data-s="load"><i class="c-load"></i>Încărcarea depozitului</button>
+        </div>
+        <span id="gInfo" class="muted"></span>
+      </div>
+      <div class="graphwrap"><canvas id="gCanvas"></canvas><div id="gTip" class="gtip" hidden></div></div>
+    </section>
+    <div class="empty" data-empty><svg viewBox="0 0 16 16"><path d="M2 13l4-5 3 3 5-7"/></svg>
+      <p>Niciun test încă.</p><span class="muted">Alege setările și apasă <b>Start</b>.</span></div>
+  </section>
+
+  <!-- ===== Backtest (raportul) ===== -->
+  <section id="tab-report" class="pane">
+    <div class="kpis" data-kpis></div>
+    <div id="rSummary" class="summary" hidden></div>
+    <div id="rBody" class="rgrid"></div>
+    <div class="empty" data-empty><svg viewBox="0 0 16 16"><path d="M3 14V8M8 14V3M13 14v-4"/></svg>
+      <p>Niciun test încă.</p><span class="muted">Statisticile apar aici, cu aceleași nume ca în raportul MT5.</span></div>
+    <section class="card verify">
+      <div class="cardhead"><h3>Verifică copia rapidă cu <code>strategy.py</code> original</h3></div>
+      <p class="hint">Rulează <code>verify_entry</code> / <code>verify_exit</code> neschimbate pe lumânări alese din perioada din
+        Setări (jumătate cu semnal, restul la întâmplare) și le compară cu semnalele folosite în test. La 1000 de lumânări
+        analizate, funcția originală durează ~7 s pe lumânare.</p>
+      <div class="vrow"><label for="vSamples">Lumânări verificate</label>
+        <input id="vSamples" type="number" min="2" max="500" value="10">
+        <button type="button" id="vGo" class="btn">Verifică</button></div>
+      <div id="vOut"></div>
+    </section>
+  </section>
+
+  <!-- ===== Tranzacții (deals) ===== -->
+  <section id="tab-deals" class="pane">
+    <div class="dealbar">
+      <div id="dFilter" class="chips small">
+        <button data-f="all" class="on">Toate</button><button data-f="win">Câștigătoare</button>
+        <button data-f="loss">Pierzătoare</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button>
+      </div>
+      <span id="dCount" class="muted"></span>
+      <button type="button" id="dCsv" class="btn ghost" disabled>Descarcă CSV</button>
+    </div>
+    <section class="card flush"><div class="tablewrap"><table id="dTable" class="deals"><thead><tr><th>Timp (UTC)</th><th>Deal</th><th>Simbol</th>
+      <th>Tip</th><th>Direcție</th><th class="r">Volum</th><th class="r">Preț</th><th class="r">Profit</th><th class="r">Balanță</th><th>Comentariu</th></tr></thead>
+      <tbody></tbody></table></div></section>
+    <div class="empty" data-empty><svg viewBox="0 0 16 16"><path d="M2 5h10l-2-2M14 11H4l2 2"/></svg>
+      <p>Nicio tranzacție încă.</p><span class="muted">Deal-urile testului apar aici, ca în tab-ul History din MT5.</span></div>
+  </section>
+
+  <!-- ===== Jurnal ===== -->
+  <section id="tab-journal" class="pane">
+    <section class="card flush"><div class="cardhead pad"><h3>Jurnal</h3>
+      <button type="button" id="jCopy" class="btn ghost">Copiază</button></div>
+      <div id="jLog" class="journal"><span class="muted">Mesajele testului apar aici.</span></div></section>
+  </section>
+</main>
+<div id="toasts" class="toasts"></div>
+<script src="/static/tester.js"></script>
+</body>
+</html>

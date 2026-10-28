@@ -82,7 +82,7 @@ La prima vizită, ngrok (planul gratuit) arată o pagină de avertizare: se apas
   ca firele să nu se învârtă în așteptare; altfel interogările la 50 ms ar ocupa tot procesorul.
 
 ## Alarme de preț
-- Butonul **🔔** din dreapta sus deschide panoul. **Dublu-click pe chart** deschide panoul cu prețul de acolo.
+- Butonul **Alarme** din dreapta sus deschide panoul. **Dublu-click pe chart** deschide panoul cu prețul de acolo.
 - Alegi prețul țintă, bid sau ask, adresa de e-mail și o notă. Direcția (peste/sub) se stabilește automat
   față de prețul curent.
 - Alarmele sunt verificate **pe server, la fiecare tic**, deci funcționează și cu pagina închisă,
@@ -107,7 +107,7 @@ Fără `.env`, alarmele apar în pagină, dar e-mailul nu se trimite (panoul te 
 - De la M1 în sus, chartul se deschide cu lumânările închise salvate de colector (lumânările oficiale cTrader)
   plus lumânarea în curs, calculată din ticuri. Când derulezi chartul spre stânga, lumânările mai vechi se
   încarcă automat, până la începutul celor salvate.
-- Butonul **💾 Export CSV** din dreapta sus: alegi simbolul, timeframe-ul (sau **ticuri** bid/ask),
+- Butonul **Export CSV** din dreapta sus: alegi simbolul, timeframe-ul (sau **ticuri** bid/ask),
   data de start și data de final (zile întregi, în ora ta locală). Fișierul se scrie pe PC-ul cu serverul,
   în `exporturi_csv/<SIMBOL>/<SIMBOL>_<TIMEFRAME>_<START>_<FINAL>.csv`; la final apare și un link de descărcare.
   Datele vin din QuestDB, deci acoperă doar perioada colectată.
@@ -122,7 +122,7 @@ Lumânările închise M1–W1 le salvează colectorul în tabelul `bars` din Que
 - **completare spre trecut**: sub 10.000 de lumânări, până la capătul istoricului brokerului.
 
 Serverul (`datastore.py`) le citește de acolo: chartul și indicatorii văd garantat aceleași lumânări.
-Starea se vede pe chart, în stânga sus, lângă „ƒx Indicatori”: `💾 M1 · 100% · 10.026 lumânări`.
+Starea se vede pe chart, în stânga sus, lângă „ƒx Indicatori”: `M1 · 100% · 10.026 lumânări`.
 Sub un minut (1s–30s) lumânările nu sunt salvate separat: le calculează QuestDB din ticuri (`SAMPLE BY`), ultimele
 10.000 închise, iar chartul și indicatorii le folosesc la fel ca pe celelalte timeframe-uri.
 Vechiul folder `datastore/` (CSV-uri pe PC) nu mai e folosit și poate fi șters.
@@ -160,6 +160,40 @@ Vechiul folder `datastore/` (CSV-uri pe PC) nu mai e folosit și poate fi șters
 - Un indicator nou: calculul în `indicators.py` (o funcție + o intrare în `SPECS`) și desenul într-un
   fișier propriu din `static/`, cu `registerIndicator({...})`.
 
+## Strategy Tester (backtest, ca în MetaTrader 5)
+Butonul **Tester** din dreapta sus deschide Strategy Tester-ul într-o fereastră peste chart (pagina `/tester`): backtest-ul strategiei din `strategy.py`
+(Nexus MA Trend, aceleași reguli ca `mt5/MQL5/Experts/Nexus/Nexus_MATrend_EA.mq5`), cu tab-urile din MT5:
+- **Setări**: simbol (cele cu ticuri în QuestDB), timeframe M1–H4, perioada (start inclus, final exclus, UTC),
+  forward (1/2, 1/3, 1/4, personalizat: deocamdată doar marcat pe grafic), modelling, depozit, monedă (USD / EUR),
+  levier. Execuție ideală, fără comision și swap, stop out la 50%.
+- **Parametri**: aceiași ca inputurile EA-ului (fără tipul MA: doar Simple, și fără desenarea liniilor).
+- **Grafic** (balanță, equity, încărcarea depozitului), **Backtest** (statisticile raportului MT5),
+  **Tranzacții** (deal-urile), **Jurnal**.
+
+Modelling, ca în MT5:
+- **Every tick based on real ticks**: toate ticurile reale bid / ask; SL / TP la prețul ticului care le atinge.
+- **1 minute OHLC**: 4 prețuri pe fiecare M1 (urcătoare O→L→H→C, coborâtoare O→H→L→C, doji invers față de
+  lumânarea anterioară; 1 tic = doar Close, 2 ticuri = Open, Close); ask = bid + spread-ul minim al minutului;
+  SL / TP la prețul din ordin.
+- **Open prices only**: strategia rulează doar la Open; SL / TP / stop out se verifică pe OHLC-ul lumânării
+  testate, la prețul din ordin.
+
+Cum lucrează (`backtester.py`, într-un proces separat):
+- Ticurile vin din QuestDB și se păstrează pe disc în `tester_cache/<sursă>/<simbol>/` (o lună = un fișier;
+  doar lunile terminate). Prima rulare pe o perioadă nouă descarcă ~20 s pe lună, următoarele durează secunde.
+  Lumânările M1 și cele ale timeframe-ului testat se fac din ticuri (H4 aliniat ca la cTrader, de la 17:00 New York).
+- Înainte de start se încarcă `InpTLBars` lumânări de încălzire (fereastra liniilor de trend).
+- Semnalele: `strategy_fast.py`, copia rapidă a lui `verify_entry` / `verify_exit` (aceleași calcule, făcute
+  incremental; funcția originală durează ~7 s pe lumânare la 1000 de lumânări). SL / TP: `transaction_limits`
+  original. `strategy.py` și `analysis.py` nu sunt modificate.
+- Butonul **Verifică** din tab-ul Backtest rulează funcțiile ORIGINALE pe lumânări alese din perioadă și le compară
+  cu copia rapidă.
+- Ca EA-ul: o dată pe lumânare, la primul tic: SL / TP / stop out, apoi închiderea pe MA, apoi intrarea (o singură
+  poziție); lotul pierde `InpRiskPct` % la SL, limitat de marja liberă; la final poziția rămasă se închide („end of test”).
+- Pentru optimizare (în lucru): `fastsim.py` = aceeași simulare „Open prices only”, compilată cu numba. Datele se
+  încarcă o dată (`prepare`), apoi un set de parametri (`simulate`) durează câteva milisecunde; `check` o compară cu
+  `backtester.run` (aceeași balanță și aceleași tranzacții).
+
 ## Fișiere
 - `server.py`: WebSocket-ul de prețuri către pagini, istoricul pentru chart, API-ul pentru alarme
 - `questfeed.py`: sursa de prețuri a serverului: QuestDB de pe VM (ticuri live la 50 ms, istoric, lumânări)
@@ -168,6 +202,9 @@ Vechiul folder `datastore/` (CSV-uri pe PC) nu mai e folosit și poate fi șters
 - `ctrader.py`: conexiunea cu cTrader Open API, folosită de colector (prețuri live, istoric, reînnoirea tokenului)
 - `ctrader_setup.py`: configurarea inițială a tokenului și a contului cTrader
 - `datastore.py`: lumânările închise citite din QuestDB (`load_bars`)
+- `backtester.py`: Strategy Tester-ul (datele, modurile de modelling, simularea); `tester_report.py`: statisticile
+  raportului; `strategy_fast.py`: copia rapidă a semnalelor din `strategy.py`; `fastsim.py`: simularea rapidă pentru optimizare;
+  pagina: `static/tester.*`
 - `indicators.py`: calculul indicatorilor pe server (rulează în procese separate)
 - `mtf.py`: zilele anului din lumânările D1, pentru indicatorul „Trend multi-timeframe”
 - `alerts.py`: salvarea și verificarea alarmelor, trimiterea e-mailurilor

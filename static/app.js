@@ -128,9 +128,15 @@ function fmtTickMark(t, type) {
 // când se schimbă dimensiunea ferestrei. Culorile se iau din style.css.
 const chart = LightweightCharts.createChart($("candles"), {
   autoSize: true,
-  layout: { background: { color: css("--bg") }, textColor: css("--muted"), fontSize: 11 },
-  grid: { vertLines: { color: css("--panel") }, horzLines: { color: css("--panel") } },
-  rightPriceScale: { borderColor: css("--border") },
+  layout: {
+    background: { color: css("--bg") }, textColor: css("--muted"), fontSize: 11,
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+  },
+  // Grila foarte discretă: ghidează ochiul fără să concureze cu lumânările.
+  grid: { vertLines: { color: "rgba(255,255,255,0.035)" }, horzLines: { color: "rgba(255,255,255,0.035)" } },
+  rightPriceScale: { borderColor: css("--border"), scaleMargins: { top: 0.12, bottom: 0.08 } },
+  // Simbolul și timeframe-ul, scrise mare și foarte estompat în fundal (updateWatermark).
+  watermark: { visible: true, text: "", fontSize: 56, color: "rgba(214,219,228,0.045)", horzAlign: "center", vertAlign: "center" },
   // timeVisible/secondsVisible: axa de timp arată ore, minute și secunde.
   // rightOffset: 8 lumânări de spațiu liber în dreapta ultimei lumânări.
   timeScale: {
@@ -139,8 +145,17 @@ const chart = LightweightCharts.createChart($("candles"), {
   },
   // Ora din dreptul cursorului (crosshair), tot în ora locală.
   localization: { timeFormatter: fmtBarTime },
-  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  crosshair: {
+    mode: LightweightCharts.CrosshairMode.Normal,
+    vertLine: { color: "rgba(125,134,150,0.55)", style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: css("--raised") },
+    horzLine: { color: "rgba(125,134,150,0.55)", style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: css("--raised") },
+  },
 });
+// Fundalul chartului: „EURUSD · H1”.
+function updateWatermark() {
+  const label = (TFS.find(([tf]) => tf === state.tf) || [0, ""])[1];
+  chart.applyOptions({ watermark: { text: `${state.symbol} · ${label}` } });
+}
 // Seria de lumânări: verde pentru lumânările care urcă, roșu pentru cele care coboară.
 const series = chart.addCandlestickSeries({
   upColor: css("--up"), downColor: css("--down"),
@@ -401,8 +416,8 @@ function drawTicks() {
   $("tickcount").textContent = ticks.length;
   if (ticks.length < 2) return;
 
-  // Margini: 74px în dreapta pentru axa de preț, 24px sus pentru titlu, 20px jos pentru ore.
-  const axisW = 74, top = 24, bottom = 20;
+  // Margini: 74px în dreapta pentru axa de preț, 12px sus (titlul e în bara panoului), 20px jos pentru ore.
+  const axisW = 74, top = 12, bottom = 20;
   const plotW = w - axisW - 8, plotH = h - top - bottom;
   // Găsim prețul minim (din bid) și maxim (din ask), ca liniile să încapă pe verticală.
   // (`[, b, a]` = ignoră primul element al ticului, timpul, și ia bid și ask.)
@@ -417,9 +432,9 @@ function drawTicks() {
 
   // grilă + axa de preț
   // 5 linii orizontale egal distanțate, cu prețul scris în dreapta fiecăreia.
-  ctx.font = "11px ui-monospace, Consolas, monospace";
+  ctx.font = "11px system-ui, -apple-system, 'Segoe UI', sans-serif";
   ctx.textBaseline = "middle";
-  ctx.strokeStyle = css("--panel");
+  ctx.strokeStyle = "rgba(255,255,255,0.035)";
   ctx.fillStyle = css("--muted");
   for (let k = 0; k <= 4; k++) {
     const p = lo + ((hi - lo) * k) / 4, yy = y(p);
@@ -441,7 +456,7 @@ function drawTicks() {
   // Desenează o linie prin toate ticurile. idx: 1 = bid, 2 = ask.
   // Primul punct cu moveTo (mută „creionul”), restul cu lineTo (trage linia).
   const line = (idx, color) => {
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.25; ctx.lineJoin = "round"; ctx.beginPath();
     ticks.forEach((t, i) => (i ? ctx.lineTo(x(i), y(t[idx])) : ctx.moveTo(x(i), y(t[idx]))));
     ctx.stroke();
   };
@@ -454,6 +469,17 @@ function drawTicks() {
   ctx.beginPath(); ctx.arc(x(ticks.length - 1), y(lb), 3, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = css("--ask");
   ctx.beginPath(); ctx.arc(x(ticks.length - 1), y(la), 3, 0, Math.PI * 2); ctx.fill();
+  // Ultimul bid / ask pe axa de preț, în etichete colorate (ca pe chartul de lumânări).
+  // Dacă s-ar suprapune, eticheta ask urcă deasupra celei de bid.
+  const tag = (p, color, yy) => {
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.roundRect(w - axisW, yy - 8, axisW - 4, 16, 3); ctx.fill();
+    ctx.fillStyle = "#0b0e13"; ctx.textBaseline = "middle";
+    ctx.fillText(p.toFixed(state.digits), w - axisW + 4, yy + 0.5);
+  };
+  const yb = y(lb), ya = Math.min(y(la), yb - 17);
+  tag(la, css("--ask"), ya);
+  tag(lb, css("--accent"), yb);
 }
 // Programează o redesenare la următorul cadru al ecranului (requestAnimationFrame).
 // Chiar dacă vin 50 de ticuri într-un cadru, desenăm o singură dată.
@@ -478,6 +504,8 @@ function setStatus(on, text) {
   const el = $("status");
   el.className = on ? "on" : "off";
   el.textContent = text;
+  $("statusBox").classList.toggle("on", on);
+  $("statusBox").classList.toggle("off", !on);
 }
 
 // Deschide (sau redeschide) conexiunea WebSocket pentru simbolul și timeframe-ul curente.
@@ -519,6 +547,7 @@ function connect() {
       if (msg.source !== state.source) { state.source = msg.source; loadSymbols(); loadSources(); }
       state.symbol = msg.symbol;
       $("symName").textContent = msg.symbol;
+      updateWatermark(); updateSymDesc();
       $("symBtn").title = msg.description || msg.symbol;
       state.digits = msg.digits;
       state.point = msg.point;
@@ -720,6 +749,7 @@ tfSel.value = state.tf;
 tfSel.addEventListener("change", () => {
   const wasTicks = tickMode();
   state.tf = Number(tfSel.value); store.set("tf", state.tf);
+  updateWatermark();
   // Intrare în / ieșire din „Ticuri”: alt fel de date pe chart (puncte numerotate / lumânări).
   if (wasTicks !== tickMode()) {
     rawBars = []; askData = []; tickMs.clear(); msTick.clear(); state.lastBar = null;
@@ -740,7 +770,10 @@ typeSel.addEventListener("change", () => {
 // Trece chartul pe alt simbol (din meniul de simboluri, symbols.js, sau dintr-o alarmă).
 function selectSymbol(s) {
   s = s.trim().toUpperCase();
-  if (s && s !== state.symbol) { state.symbol = s; store.set("symbol", s); $("symName").textContent = s; connect(); }
+  if (s && s !== state.symbol) {
+    state.symbol = s; store.set("symbol", s); $("symName").textContent = s;
+    updateWatermark(); updateSymDesc(); connect();
+  }
 }
 $("symName").textContent = state.symbol;
 
@@ -761,6 +794,9 @@ async function loadSources() {
       sourceSel.appendChild(o);
     }
     sourceSel.value = active;
+    // O singură sursă: lista nu are ce alege, deci o ascundem; numele apare la starea conexiunii.
+    sourceSel.hidden = sources.length <= 1;
+    $("statusBox").title = `Sursa prețurilor: ${sources.find((s) => s.id === active)?.name || active}`;
     sourceSel.title = ["Sursa prețurilor", ...sources.filter((s) => s.problem)
       .map((s) => `${s.name}: ${s.problem}`)].join("\n");
   } catch { /* serverul nu răspunde încă; lista se completează la următorul hello */ }
@@ -794,7 +830,47 @@ sourceSel.addEventListener("change", async () => {
   }
 });
 
+// ---------- Panoul de ticuri: înălțime reglabilă și restrângere ----------
+// Separatorul dintre charturi se trage cu mouse-ul (sau degetul); înălțimea și starea
+// (restrâns / extins) se păstrează în browser. Restrâns, rămâne doar bara panoului.
+// Dublu-click pe separator = înălțimea implicită.
+const tickPane = $("tickPane"), split = $("split");
+const TICK_MIN = 90;
+function setTickHeight(px) {
+  const max = Math.max(TICK_MIN, document.querySelector("main").clientHeight - 160);
+  px = Math.round(Math.max(TICK_MIN, Math.min(max, px)));
+  tickPane.style.flex = `0 0 ${px}px`;
+  return px;
+}
+function setTickCollapsed(c) {
+  tickPane.classList.toggle("collapsed", c);
+  split.hidden = c;
+  store.set("tickCollapsed", c ? "1" : "");
+  if (c) tickPane.style.flex = "";
+  else if (Number(store.get("tickHeight", 0))) setTickHeight(Number(store.get("tickHeight", 0)));
+  requestDraw();
+}
+split.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  split.setPointerCapture(e.pointerId);
+  split.classList.add("drag");
+  const startY = e.clientY, startH = tickPane.clientHeight;
+  const move = (ev) => store.set("tickHeight", setTickHeight(startH - (ev.clientY - startY)));
+  const up = () => {
+    split.classList.remove("drag");
+    split.removeEventListener("pointermove", move);
+    split.removeEventListener("pointerup", up);
+  };
+  split.addEventListener("pointermove", move);
+  split.addEventListener("pointerup", up);
+});
+split.addEventListener("dblclick", () => { store.set("tickHeight", ""); tickPane.style.flex = ""; });
+$("tickToggle").onclick = () => setTickCollapsed(!tickPane.classList.contains("collapsed"));
+if (store.get("tickCollapsed", "")) setTickCollapsed(true);
+else if (Number(store.get("tickHeight", 0))) setTickHeight(Number(store.get("tickHeight", 0)));
+
 // Pornirea: aplicăm tipul de afișare salvat și ne conectăm la server.
+updateWatermark();
 applyChartType();
 loadSources();
 connect();

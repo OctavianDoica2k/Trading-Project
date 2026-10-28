@@ -1,4 +1,4 @@
-// Fereastra „Export date în CSV” (butonul 💾 din dreapta sus).
+// Fereastra „Export date în CSV” (butonul Export CSV din dreapta sus).
 // =====================================================================================
 //  CE FACE ACEST FIȘIER (pe scurt)
 // -------------------------------------------------------------------------------------

@@ -55,7 +55,7 @@ function createSma(id, isNew) {
     const el = document.createElement("div");
     el.className = "indwidget";
     el.innerHTML = `
-      <span class="indname" title="Medie mobilă (medie_mobila din analysis.py)">〰 MA</span>
+      <span class="indname" title="Medie mobilă (medie_mobila din analysis.py)">MA</span>
       <label class="indpct" title="Perioada: câte lumânări intră în medie (1–${SMA_MAX_PERIOD})"><input type="number"
         class="smaperiod" min="1" max="${SMA_MAX_PERIOD}" step="1" inputmode="numeric" aria-label="Perioada mediei mobile"></label>
       <select class="indselect" aria-label="Prețul pe care se calculează media" title="Prețul pe care se calculează media">
@@ -159,7 +159,8 @@ registerIndicator({
   id: "sma",
   multi: true,
   name: "Medie mobilă",
-  icon: "〰",
+  iconHTML: '<svg class="ico" viewBox="0 0 16 16"><path d="M1.5 11c2.5 0 3-5 6.5-5s4 3 6.5 3"/></svg>',
+  icon: "MA",
   desc: "Media mobilă pe o perioadă, calculată pe close, open, high sau low — rulează medie_mobila() din analysis.py",
   note: "Se poate adăuga de mai multe ori (ex. perioade diferite). Se calculează pe server, din datastore-ul " +
     "local, pe lumânările închise ale timeframe-ului curent, și se recalculează la fiecare lumânare închisă. " +

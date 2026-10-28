@@ -15,44 +15,52 @@
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-<!-- ===== Bara de sus: controale + cotația curentă ===== -->
+<!-- ===== Bara de sus: piața (stânga), cotația (mijloc), starea și acțiunile (dreapta) ===== -->
 <header>
   <div class="controls">
-    <!-- Sursa prețurilor (MetaTrader 5 / cTrader); opțiunile le completează app.js din /api/sources. -->
-    <select id="source" title="Sursa prețurilor"></select>
-    <!-- Butonul simbolului: deschide meniul de simboluri (symbols.js). -->
+    <!-- Butonul simbolului: numele + descrierea; deschide meniul de simboluri (symbols.js). -->
     <button id="symBtn" class="symbtn" title="Alege simbolul" aria-haspopup="listbox" aria-expanded="false">
-      <span id="symName">EURUSD</span><span class="caret">▾</span>
+      <span class="symtxt"><span id="symName">EURUSD</span><span id="symDesc" class="symdesc"></span></span>
+      <svg class="ico caret" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg>
     </button>
     <!-- Sugestiile pentru câmpul de simbol din fereastra de export (completate de symbols.js). -->
     <datalist id="symbols"></datalist>
-    <!-- Lista de timeframe-uri (1s, 5s, ..., W1); opțiunile le creează app.js. -->
+    <!-- Timeframe-ul (Ticuri, 1s ... W1) și tipul de afișare; opțiunile le creează app.js. -->
     <select id="tf" class="hsel" title="Timeframe"></select>
-    <!-- Tipul de afișare a chartului (lumânări, Heikin-Ashi, linie...); opțiunile le creează app.js. -->
     <select id="chartType" class="hsel" title="Tipul de afișare"></select>
-    <!-- Butonul care deschide fereastra de alarme; #alertCount = numărul de alarme active. -->
-    <button id="alertBtn" class="alertbtn" title="Alarme de preț">🔔<span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
+    <!-- Sursa prețurilor; ascunsă cât timp serverul are o singură sursă (app.js, loadSources). -->
+    <select id="source" class="hsel" title="Sursa prețurilor" hidden></select>
   </div>
   <!-- Cotația: fiecare valoare are un id pe care app.js îl actualizează la fiecare tic. -->
   <div class="quote">
-    <div class="px"><span class="lbl">BID</span><span id="bid">—</span></div>
-    <div class="px"><span class="lbl">ASK</span><span id="ask">—</span></div>
+    <div class="px"><span class="lbl">Bid</span><span id="bid">—</span></div>
+    <div class="px"><span class="lbl">Ask</span><span id="ask">—</span></div>
     <div class="stat"><span class="lbl">Spread</span><span id="spread">—</span></div>
-    <div class="stat"><span class="lbl">Ultimul tic</span><span id="ticktime">—</span></div>
-    <div class="stat"><span class="lbl">Ticuri/s</span><span id="tps">0</span></div>
-    <div class="stat"><span class="lbl">Stare</span><span id="status" class="off">deconectat</span></div>
   </div>
-  <!-- Butonul din dreapta sus care deschide fereastra de export CSV (gestionată de export.js). -->
-  <button id="exportBtn" class="alertbtn exportbtn" title="Salvează datele în CSV">💾<span class="btntxt">Export CSV</span></button>
+  <div class="hright">
+    <!-- Starea conexiunii (punct verde = live), ora ultimului tic și ticurile pe secundă. -->
+    <div id="statusBox" class="status off" title="Starea conexiunii cu serverul">
+      <i class="sdot"></i><span id="status">deconectat</span>
+      <span class="smeta"><span id="ticktime">—</span><span class="sep">·</span><span id="tps">0</span> tic/s</span>
+    </div>
+    <div class="actions hactions">
+      <!-- Alarmele de preț; #alertCount = numărul de alarme active. -->
+      <button id="alertBtn" class="hbtn alertbtn" title="Alarme de preț"><svg class="ico" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14h3"/></svg><span class="btntxt">Alarme</span><span id="alertCount" class="badge">0</span></button>
+      <!-- Strategy Tester: se deschide într-o fereastră peste chart (testerwin.js). -->
+      <button id="testerBtn" class="hbtn testerbtn" title="Strategy Tester"><svg class="ico" viewBox="0 0 16 16"><path d="M2.5 13.5h11"/><path d="M3.5 11l3-3.5 2.5 2 4-5.5"/></svg><span class="btntxt">Tester</span><span id="testerDot" class="tdot" hidden></span></button>
+      <!-- Exportul CSV (export.js). -->
+      <button id="exportBtn" class="hbtn exportbtn" title="Salvează datele în CSV"><svg class="ico" viewBox="0 0 16 16"><path d="M8 2.5v7.5M4.8 7l3.2 3.2L11.2 7"/><path d="M2.8 11.5v2h10.4v-2"/></svg><span class="btntxt">Export CSV</span></button>
+    </div>
+  </div>
 </header>
-<!-- ===== Zona principală: cele două charturi ===== -->
+<!-- ===== Zona principală: chartul de lumânări, separatorul și chartul de ticuri ===== -->
 <main>
   <!-- Chartul de lumânări (desenat de lightweight-charts în acest element). -->
   <section id="candles" class="pane">
     <div class="chartbar">
       <!-- Butonul din stânga sus al chartului care deschide meniul de indicatori (indicators.js). -->
       <button id="indBtn" class="chartbtn" title="Indicatori"><i>ƒx</i> Indicatori</button>
-      <!-- Cât din datastore-ul local (simbol + timeframe) e descărcat; bara de progres (datastore.js). -->
+      <!-- Lumânările încărcate (simbol + timeframe); bara de progres (datastore.js). -->
       <div id="storeBadge" class="storebadge" hidden><span class="sbtext"></span><div class="progress" hidden><div></div></div></div>
       <!-- Recuperarea ticurilor lipsă de către colectorul de pe VM; bara de progres (sync.js). -->
       <div id="syncBadge" class="storebadge" hidden><span class="sbtext"></span><div class="progress" hidden><div></div></div></div>
@@ -60,13 +68,20 @@
     <!-- Aici apar, în dreapta sus, controalele indicatorilor atașați (ex. sliderul Trend). -->
     <div id="indWidgets" class="indwidgets"></div>
   </section>
-  <!-- Chartul de ticuri, desenat de app.js pe <canvas>. -->
-  <section class="pane tickpane">
-    <div class="panetitle">Ticuri (bid / ask) — ultimele <span id="tickcount">0</span></div>
+  <!-- Separatorul: trăgând de el schimbi înălțimea chartului de ticuri (app.js). -->
+  <div id="split" class="split" role="separator" aria-orientation="horizontal" title="Trage ca să redimensionezi"></div>
+  <!-- Chartul de ticuri, desenat de app.js pe <canvas>; se poate restrânge din bara lui. -->
+  <section id="tickPane" class="pane tickpane">
+    <div class="panehead">
+      <span class="ptitle">Ticuri</span>
+      <span class="plegend"><i class="lb"></i>bid<i class="la"></i>ask</span>
+      <span class="pcount">ultimele <span id="tickcount">0</span></span>
+      <button id="tickToggle" class="iconbtn ptoggle" title="Restrânge / extinde"><svg class="ico" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></button>
+    </div>
     <canvas id="ticks"></canvas>
   </section>
 </main>
-<!-- ===== Fereastra de alarme (ascunsă până apeși 🔔; atributul hidden o ascunde) ===== -->
+<!-- ===== Fereastra de alarme (ascunsă până apeși butonul Alarme; atributul hidden o ascunde) ===== -->
 <aside id="alertPanel" class="panel" role="dialog" aria-label="Alarme de preț" hidden>
   <!-- Titlul: pe desktop, trăgând de el muți fereastra. -->
   <div class="panelhead">
@@ -128,7 +143,7 @@
   <div class="listhead">Alarmele tale</div>
   <ul id="alertList" class="alertlist"></ul>
 </aside>
-<!-- ===== Fereastra de export CSV (ascunsă până apeși 💾) ===== -->
+<!-- ===== Fereastra de export CSV (ascunsă până apeși Export CSV) ===== -->
 <aside id="exportPanel" class="panel" role="dialog" aria-label="Export CSV" hidden>
   <div class="panelhead">
     <h2>Export date în CSV</h2>
@@ -170,7 +185,7 @@
     <h2>Indicatori</h2>
     <button id="indClose" class="iconbtn" aria-label="Închide">✕</button>
   </div>
-  <input id="indSearch" class="indsearch" type="search" placeholder="🔍 Caută indicator..." autocomplete="off" spellcheck="false">
+  <input id="indSearch" class="indsearch" type="search" placeholder="Caută indicator..." autocomplete="off" spellcheck="false">
   <!-- Cartonașele indicatorilor, construite de indicators.js din lista indicatorilor înregistrați. -->
   <div id="indList" class="indlist"></div>
   <div class="actions"><button type="button" id="indAttach" class="primary indattach">Atașează</button></div>
@@ -179,9 +194,23 @@
 <!-- ===== Meniul de simboluri (deschis de butonul simbolului din bara de sus) ===== -->
 <!-- Simbolurile sursei de prețuri active, pe categorii; căutarea filtrează lista la fiecare literă. -->
 <div id="symPanel" class="sympanel" role="dialog" aria-label="Alege simbolul" hidden>
-  <input id="symSearch" class="indsearch" type="search" placeholder="🔍 Caută simbol sau descriere..." autocomplete="off" spellcheck="false">
+  <input id="symSearch" class="indsearch" type="search" placeholder="Caută simbol sau descriere..." autocomplete="off" spellcheck="false">
   <div id="symInfo" class="syminfo"></div>
   <div id="symTree" class="symtree" role="listbox"></div>
+</div>
+<!-- ===== Fereastra Strategy Tester (pagina /tester într-un iframe, încărcată la prima deschidere) ===== -->
+<!-- Închiderea doar o ascunde: un test pornit continuă să ruleze, iar la redeschidere îl regăsești. -->
+<div id="testerWin" class="twin" role="dialog" aria-label="Strategy Tester" hidden>
+  <div class="twinbox">
+    <div class="twinhead">
+      <span class="twintitle">Strategy Tester <small>Nexus MA Trend · strategy.py</small></span>
+      <span id="testerState" class="twinstate"></span>
+      <a id="testerTab" class="iconbtn" href="/tester" target="_blank" rel="noopener" title="Deschide într-un tab nou">↗</a>
+      <button id="testerMax" class="iconbtn" title="Mărește / micșorează">⤢</button>
+      <button id="testerClose" class="iconbtn" title="Închide (Esc)" aria-label="Închide">✕</button>
+    </div>
+    <iframe id="testerFrame" title="Strategy Tester"></iframe>
+  </div>
 </div>
 <!-- Containerul pentru mesajele plutitoare („toast”) afișate la declanșarea unei alarme. -->
 <div id="toasts" class="toasts"></div>
@@ -197,5 +226,6 @@
 <script src="/static/trend.js"></script>
 <script src="/static/sma.js"></script>
 <script src="/static/mtf.js"></script>
+<script src="/static/testerwin.js"></script>
 </body>
 </html>

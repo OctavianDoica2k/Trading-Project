@@ -158,7 +158,7 @@ class PushService:
         d = alert.get("digits", 5)
         arrow = "↑" if alert["direction"] == "above" else "↓"
         payload = {
-            "title": f"🔔 {alert['symbol']} {arrow} {alert['price']:.{d}f}",
+            "title": f"{alert['symbol']} {arrow} {alert['price']:.{d}f}",
             "body": f"Atins: {alert['trigger_price']:.{d}f} ({alert['side']})"
                     + (f" — {alert['note']}" if alert.get("note") else ""),
             # tag: notificările cu același tag se înlocuiesc (nu apare aceeași alarmă de două ori).

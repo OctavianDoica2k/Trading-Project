@@ -5,3 +5,4 @@ python-dotenv>=1.0
 pywebpush>=2.0
 pandas>=2.0          # pentru analysis.py (indicatorul 📈 Trend)
 questdb>=6.0         # baza de date de pe VM (tickdb.py): colectorul scrie, serverul citește
+numba>=0.60          # Strategy Tester: liniile de trend (strategy_fast) și simularea rapidă (fastsim.py)

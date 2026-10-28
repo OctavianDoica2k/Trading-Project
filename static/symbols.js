@@ -41,8 +41,16 @@ function loadSymbols() {
     }
     symItems = tree;
     symLoaded = tree.length > 0;
+    updateSymDesc();
     if (!symPanel.hidden) renderSymbols();
   }).catch(() => {});
+}
+
+// Descrierea simbolului curent sub numele lui, pe butonul din bara de sus (ex. „Euro vs US Dollar”).
+function updateSymDesc() {
+  const it = symItems.find((x) => x.s === state.symbol);
+  $("symDesc").textContent = it?.d || "";
+  $("symBtn").title = it?.d ? `${it.s} — ${it.d} (alege alt simbol)` : "Alege simbolul";
 }
 
 // Textul pentru comparare: litere mici, fără „/”, spații și puncte (ex. „EUR/USD” = „eurusd”).

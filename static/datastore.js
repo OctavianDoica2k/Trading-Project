@@ -71,7 +71,7 @@ window.onStoreStatus = (s) => {
     ].join("\n");
   }
   // Afișăm textul și explicația; bara apare doar când avem un procent de arătat.
-  storeText.textContent = `💾 ${text}`;
+  storeText.textContent = text;
   storeBadge.title = title;
   storeBar.parentElement.hidden = bar === null;
   if (bar !== null) storeBar.style.width = `${Math.max(0, Math.min(1, bar)) * 100}%`;

@@ -5,7 +5,7 @@
 //  - Fereastra „Alarme de preț”: deschidere/închidere, mutare cu mouse-ul, formularul.
 //  - Linia mov de alarmă de pe chart: o poți trage, iar câmpul „Preț țintă” se completează
 //    automat (și invers: dacă scrii prețul, linia se mută).
-//  - Lista alarmelor (cerută de la server) și liniile punctate 🔔 pentru alarmele active.
+//  - Lista alarmelor (cerută de la server) și liniile punctate „alarmă” pentru alarmele active.
 //  - Ce se întâmplă în pagină când se declanșează o alarmă: mesaj pe ecran, sunet,
 //    notificare de browser.
 //
@@ -16,7 +16,7 @@
 const panel = $("alertPanel");
 const form = $("alertForm");
 const aPrice = $("aPrice"), aSide = $("aSide"), aEmail = $("aEmail"), aNote = $("aNote");
-// alertList = alarmele primite de la server; alertLines = liniile 🔔 desenate pe chart.
+// alertList = alarmele primite de la server; alertLines = liniile „alarmă” desenate pe chart.
 let alertList = [];
 let alertLines = [];
 // smtpOk = e-mailul e configurat pe server? (dacă nu, afișăm un avertisment)
@@ -71,7 +71,7 @@ function closePanel() {
   candlesEl.classList.remove("editing", "nearline", "dragging");
   removeDraft();
 }
-// Butonul 🔔 deschide/închide fereastra; ✕ și tasta Escape o închid.
+// Butonul Alarme deschide/închide fereastra; ✕ și tasta Escape o închid.
 $("alertBtn").onclick = () => (panel.hidden ? openPanel() : closePanel());
 $("alertClose").onclick = closePanel;
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !panel.hidden) closePanel(); });
@@ -299,7 +299,7 @@ async function refresh() {
   render();
 }
 
-// Construiește lista de alarme din fereastră și numărul de pe butonul 🔔.
+// Construiește lista de alarme din fereastră și numărul de pe butonul Alarme.
 function render() {
   const active = alertList.filter((a) => a.status === "active");
   $("alertCount").textContent = active.length;
@@ -340,8 +340,8 @@ function render() {
     li.querySelector(".aprice").textContent = `${arrow} ${fx(a.price)} (${a.side})`;
     li.querySelector(".ameta").textContent = when;
     li.querySelector(".mail").textContent = a.email
-      ? `✉ ${a.email}${a.email_status ? ` — ${a.email_status}` : ""}`
-      : "✉ fără e-mail";
+      ? `E-mail: ${a.email}${a.email_status ? ` — ${a.email_status}` : ""}`
+      : "Fără e-mail";
     li.querySelector(".anote").textContent = a.note || "";
     // ✕ șterge alarma de pe server, apoi reîmprospătăm lista.
     li.querySelector(".del").onclick = async () => {
@@ -356,7 +356,7 @@ function render() {
   drawLines();
 }
 
-// Desenează câte o linie punctată 🔔 pentru fiecare alarmă activă a simbolului curent.
+// Desenează câte o linie punctată „alarmă” pentru fiecare alarmă activă a simbolului curent.
 // Ștergem întâi liniile vechi, apoi le creăm din nou.
 function drawLines() {
   for (const l of alertLines) series.removePriceLine(l);
@@ -364,7 +364,7 @@ function drawLines() {
     .filter((a) => a.status === "active" && a.symbol === state.symbol)
     .map((a) => series.createPriceLine({
       price: a.price, color: css("--alert"), lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "🔔",
+      lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "alarmă",
     }));
 }
 
@@ -427,7 +427,7 @@ window.onAlertEvent = (a) => {
   if (a.status !== "triggered" || seenFired.has(a.id)) return;
   seenFired.add(a.id);
   const fx = (p) => Number(p).toFixed(a.digits ?? state.digits);
-  const title = `🔔 ${a.symbol} ${a.direction === "above" ? "↑" : "↓"} ${fx(a.price)}`;
+  const title = `${a.symbol} ${a.direction === "above" ? "↑" : "↓"} ${fx(a.price)}`;
   const text = `Atins: ${fx(a.trigger_price)} (${a.side})${a.note ? " — " + a.note : ""}`;
   toast(title, text);
   beep();
@@ -437,5 +437,5 @@ window.onAlertEvent = (a) => {
   }
 };
 
-// La încărcarea paginii: cerem lista de alarme (pentru numărul de pe buton și liniile 🔔).
+// La încărcarea paginii: cerem lista de alarme (pentru numărul de pe buton și liniile „alarmă”).
 refresh();

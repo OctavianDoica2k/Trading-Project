@@ -112,7 +112,7 @@ async function sendSubscription() {
 
 // Instrucțiunile afișate când notificările sunt blocate pentru site.
 const BLOCKED_HINT =
-  "Notificările sunt blocate pentru acest site. Apasă pe iconița 🔒 (sau ⓘ) din stânga adresei → " +
+  "Notificările sunt blocate pentru acest site. Apasă pe iconița lacăt (sau ⓘ) din stânga adresei → " +
   "<b>Notificări → Permite</b>, apoi reîncarcă pagina.";
 
 // Afișează pasul curent sub butoane și îl scrie și în consola browserului (F12), fără etichetele HTML.
@@ -126,7 +126,7 @@ async function enablePush() {
   // De aceea, dacă după 2,5 secunde n-a venit niciun răspuns, explicăm unde trebuie apăsat.
   step("Aștept permisiunea browserului…");
   const hintTimer = setTimeout(() => step(
-    "Aștept permisiunea… Dacă nu a apărut nicio fereastră, apasă pe <b>clopoțelul</b> (sau iconița 🔒) " +
+    "Aștept permisiunea… Dacă nu a apărut nicio fereastră, apasă pe <b>clopoțelul</b> (sau iconița lacăt) " +
     "din bara de adrese, sus, și alege <b>Permite</b>."), 2500);
   let perm;
   try { perm = await Notification.requestPermission(); } finally { clearTimeout(hintTimer); }
@@ -177,7 +177,7 @@ $("pushToggle").onclick = async () => {
     await (wasOn ? disablePush() : enablePush());
     await refreshPush();
     if (!wasOn && pushSub) {
-      $("pushHint").innerHTML = "✅ Notificări activate. " + ownerHint() +
+      $("pushHint").innerHTML = "Notificări activate. " + ownerHint() +
         " Apasă „Trimite notificare de test” ca să verifici.";
     }
   } catch (err) {
@@ -196,7 +196,7 @@ $("pushTest").onclick = async () => {
   try {
     step("Trimit notificarea de test…");
     await api("POST", "/api/push/test", { endpoint: pushSub.endpoint });
-    step("✅ Trimisă — ar trebui să apară în colțul din dreapta jos. Dacă nu apare: Windows " +
+    step("Trimisă — ar trebui să apară în colțul din dreapta jos. Dacă nu apare: Windows " +
       "<b>Settings → System → Notifications</b> trebuie să fie activat pentru browser, iar „Do not disturb” oprit.");
   } catch (err) {
     step(`<span class="down">Eroare: ${String(err.message).replace(/</g, "&lt;")}</span>`);

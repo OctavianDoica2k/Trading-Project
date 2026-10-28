@@ -20,6 +20,10 @@
   --ask: #f0b429;
   --accent: #4c8dff;
   --alert: #c77dff;
+  /* suprafețe ridicate (butoane, etichete) / margini discrete / inelul de focus */
+  --raised: #1d2330;
+  --border-soft: #1e2430;
+  --ring: rgba(76, 141, 255, .18);
 }
 /* box-sizing: border-box = lățimea unui element include marginea interioară (padding) și chenarul. */
 * { box-sizing: border-box; }
@@ -31,34 +35,40 @@ body {
   font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
   display: flex;
   flex-direction: column;
+  -webkit-font-smoothing: antialiased;
 }
-/* Bara de sus: elementele trec pe rândul următor (wrap) dacă nu încap. */
+/* Bara de sus, pe un rând: piața (stânga), cotația, apoi starea și acțiunile (împinse la dreapta). */
 header {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 28px;
+  gap: 10px 24px;
   align-items: center;
-  padding: 10px 16px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
-/* Grupul de controale din stânga barei (sursă, simbol, timeframe, tip, alarme), pe un rând. */
-.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-/* Butonul simbolului (deschide meniul de simboluri). */
+/* Controalele pieței: simbol, timeframe, tipul de afișare (toate cu aceeași înălțime, 36px). */
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* Butonul simbolului: numele mare, descrierea mică dedesubt, săgeata în dreapta. */
 .symbtn {
-  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-width: 120px; max-width: 180px;
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-width: 150px; max-width: 240px; height: 36px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: 600 14px/1 inherit;
+  border-radius: 8px;
+  padding: 0 10px 0 12px;
+  font: inherit;
   cursor: pointer;
+  transition: border-color .15s, background .15s;
 }
 .symbtn:hover, .symbtn[aria-expanded="true"] { border-color: var(--accent); }
-.symbtn #symName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.symbtn .caret { color: var(--muted); font-size: 11px; }
+.symbtn[aria-expanded="true"] .caret { transform: rotate(180deg); }
+.symtxt { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; line-height: 1.15; }
+.symbtn #symName { font-weight: 700; font-size: 14px; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.symdesc { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+.symdesc:empty { display: none; }
+.symbtn .caret { color: var(--muted); transition: transform .15s; }
 /* Meniul de simboluri: sub buton, cu căutarea sus și lista pe categorii dedesubt. */
 .sympanel {
   position: fixed; z-index: 30;
@@ -90,58 +100,94 @@ header {
 .symrow.cur b { color: var(--accent); }
 .symrow.active { outline: 1px solid var(--accent); outline-offset: -1px; }
 .symrow mark { background: rgba(240, 180, 41, .3); color: inherit; border-radius: 2px; }
-/* Lista sursei de prețuri (MT5 / cTrader). */
-#source, .hsel {
-  background: var(--bg);
+/* Listele din bară (timeframe, tipul de afișare, sursa): aceeași înălțime, săgeată proprie. */
+.hsel {
+  height: 36px;
+  background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237d8696' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.5L8 10l3.5-3.5'/%3E%3C/svg%3E") no-repeat right 8px center / 14px;
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border-radius: 8px;
+  padding: 0 30px 0 12px;
   font: 600 13px/1 inherit;
   cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  transition: border-color .15s;
 }
+.hsel option { background: var(--panel); color: var(--text); }
+.hsel[hidden] { display: none; }
 #source:disabled { opacity: .6; cursor: wait; }
-.hsel:hover, #source:hover { border-color: var(--accent); }
-/* Zona de cotație: fiecare valoare are deasupra o etichetă mică (.lbl). */
-.quote { display: flex; gap: 22px; align-items: flex-end; flex-wrap: wrap; }
-.px, .stat { display: flex; flex-direction: column; }
-.lbl { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
-/* Prețurile bid/ask: font mare, cu cifre de lățime egală (tabular-nums), ca să nu „sară” la schimbare. */
+.hsel:hover { border-color: var(--accent); }
+.hsel:focus-visible, .symbtn:focus-visible, .hbtn:focus-visible, .chartbtn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); border-color: var(--accent); }
+/* Cotația: bid și ask mari (cu cifre de lățime egală, ca să nu „sară”), spread-ul mai mic. */
+.quote { display: flex; gap: 22px; align-items: center; padding-left: 22px; border-left: 1px solid var(--border); }
+.px, .stat { display: flex; flex-direction: column; gap: 1px; }
+.lbl { color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
 .px span:last-child {
-  font: 600 22px/1.1 ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-variant-numeric: tabular-nums;
-  transition: color .15s;
+  font: 600 20px/1.1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+  transition: color .2s;
 }
-.stat span:last-child { font: 500 14px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.stat span:last-child { font: 500 14px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--text); }
+/* Dreapta: starea conexiunii, apoi butoanele de acțiune. */
+.hright { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.status {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px;
+  border: 1px solid var(--border-soft); border-radius: 99px; background: var(--bg);
+  font-size: 12px; white-space: nowrap; cursor: default;
+}
+.sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--down); flex: none; }
+.status.on .sdot { background: var(--up); box-shadow: 0 0 0 3px rgba(38, 166, 154, .2); animation: livepulse 2s ease-in-out infinite; }
+@keyframes livepulse { 50% { box-shadow: 0 0 0 5px rgba(38, 166, 154, 0); } }
+.status #status { font-weight: 600; }
+.smeta { color: var(--muted); font: 11.5px ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.smeta .sep { margin: 0 6px; }
+.hactions { display: flex; gap: 6px; }
+/* Butoanele din bara de sus (Alarme, Tester, Export CSV): același stil, iconiță + text. */
+.hbtn {
+  display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px;
+  background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  font: 600 12.5px/1 inherit; cursor: pointer; white-space: nowrap; transition: border-color .15s, background .15s;
+}
+.hbtn:hover { border-color: #3a4456; background: var(--raised); }
 /* Clase de culoare folosite în mai multe locuri (prețuri, indicii, stări). */
 .up { color: var(--up); }
 .down { color: var(--down); }
 #status.on { color: var(--up); }
 #status.off { color: var(--down); }
-/* Zona charturilor ocupă tot spațiul rămas; lumânările iau ~70% din înălțime, ticurile restul. */
+/* Zona charturilor ocupă tot spațiul rămas; lumânările iau ~70% din înălțime, ticurile restul
+   (înălțimea ticurilor se poate schimba trăgând de separator; app.js o păstrează). */
 main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .pane { position: relative; min-height: 0; }
 #candles { flex: 3; }
-.tickpane { flex: 1.3; border-top: 1px solid var(--border); }
-/* Titlul chartului de ticuri, suprapus peste colțul din stânga sus; nu interceptează mouse-ul. */
-.panetitle {
-  position: absolute; top: 6px; left: 12px; z-index: 1;
-  color: var(--muted); font-size: 11px; pointer-events: none;
+.tickpane { flex: 1.3; display: flex; flex-direction: column; }
+/* Separatorul dintre charturi: o linie subțire, cu zonă de prindere mai mare și evidențiată la tragere. */
+.split { position: relative; flex: none; height: 1px; background: var(--border); cursor: row-resize; z-index: 5; touch-action: none; }
+.split::before { content: ""; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
+.split:hover, .split.drag { background: var(--accent); }
+.split[hidden] { display: none; }
+/* Bara chartului de ticuri: titlu, legenda culorilor, câte ticuri, butonul de restrângere. */
+.panehead {
+  display: flex; align-items: center; gap: 12px; flex: none; height: 30px; padding: 0 6px 0 14px;
+  background: var(--panel); border-bottom: 1px solid var(--border-soft); font-size: 12px; color: var(--muted); user-select: none;
 }
-#ticks { width: 100%; height: 100%; display: block; }
+.ptitle { color: var(--text); font-weight: 600; }
+.plegend { display: inline-flex; align-items: center; gap: 6px; }
+.plegend i { width: 12px; height: 2px; border-radius: 2px; margin-left: 4px; }
+.plegend .lb { background: var(--accent); }
+.plegend .la { background: var(--ask); }
+.pcount { font-variant-numeric: tabular-nums; }
+.ptoggle { margin-left: auto; display: inline-flex; padding: 4px; }
+.ptoggle .ico { transition: transform .2s; }
+.tickpane.collapsed { flex: 0 0 30px !important; border-top: 1px solid var(--border); }
+.tickpane.collapsed .ptoggle .ico { transform: rotate(180deg); }
+.tickpane.collapsed canvas { display: none; }
+#ticks { width: 100%; flex: 1; min-height: 0; display: block; }
 
 /* ---------- Alarme ---------- */
-/* Butonul 🔔 din bara de sus și bulina cu numărul de alarme active (.badge). */
-.alertbtn {
-  background: transparent; color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 10px; cursor: pointer; font: 600 12px/1 inherit;
-  display: inline-flex; gap: 6px; align-items: center;
-}
-.alertbtn:hover { border-color: var(--alert); }
+/* Butonul Alarme din bara de sus și bulina cu numărul de alarme active (.badge). */
 .badge {
   background: var(--alert); color: #10131a; border-radius: 9px;
-  padding: 2px 6px; font-size: 11px; min-width: 18px; text-align: center;
+  padding: 2px 6px; font-size: 11px; line-height: 1.2; min-width: 18px; text-align: center;
 }
 /* Fără alarme active, bulina devine gri. */
 .badge.zero { background: var(--border); color: var(--muted); }
@@ -156,25 +202,26 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   max-width: calc(100% - var(--axis-w, 64px) - 24px);
 }
 .chartbtn {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 10px; cursor: pointer; font: 600 12px/1 inherit;
+  display: inline-flex; align-items: center; gap: 6px; height: 28px;
+  background: rgba(22, 27, 36, .92); color: var(--text); border: 1px solid var(--border); border-radius: 7px;
+  padding: 0 11px; cursor: pointer; font: 600 12px/1 inherit; backdrop-filter: blur(4px);
+  transition: border-color .15s;
 }
 .chartbtn i { color: var(--accent); font-style: italic; font-weight: 700; font-family: Georgia, serif; }
 .chartbtn:hover { border-color: var(--accent); }
 /* Datastore-ul local: text + bara de progres (în timpul descărcării). */
 .storebadge {
-  display: flex; flex-direction: column; gap: 4px; min-width: 0;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 10px; font: 12px/1 inherit; color: var(--muted); cursor: default;
+  display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; min-height: 28px;
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+  padding: 0 8px; font: 11.5px/1 inherit; color: var(--muted); cursor: help;
   font-variant-numeric: tabular-nums;
 }
 .storebadge[hidden] { display: none; }
 .storebadge .sbtext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .storebadge .progress { height: 4px; min-width: 160px; }
-.storebadge.syncing { color: var(--text); border-color: var(--accent); }
-.storebadge.ready { color: var(--text); }
-.storebadge.error { color: var(--down); border-color: var(--down); }
+.storebadge.syncing { color: var(--text); border-color: var(--accent); background: rgba(22, 27, 36, .92); padding: 6px 10px; }
+.storebadge.ready { color: var(--muted); }
+.storebadge.error { color: var(--down); border-color: rgba(239, 83, 80, .5); background: rgba(239, 83, 80, .08); }
 /* Controlul unui indicator care nu rulează pe timeframe-ul curent (1s–30s): estompat. */
 .indwidget.off { opacity: .6; }
 /* Coloana de controale ale indicatorilor, în dreapta sus, lângă scala de prețuri. */
@@ -369,10 +416,6 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 }
 
 /* ---------- Export CSV ---------- */
-/* Butonul 💾 stă fix în colțul din dreapta sus al barei (bara îi păstrează loc în dreapta). */
-header { position: relative; padding-right: 150px; }
-.exportbtn { position: absolute; top: 10px; right: 16px; }
-.exportbtn:hover { border-color: var(--accent); }
 /* Fereastra de export nu se mută cu mouse-ul. */
 #exportPanel .panelhead { cursor: default; }
 #exportForm { padding-top: 8px; }
@@ -417,7 +460,7 @@ code { word-break: break-all; }
 /* margin-left: auto împinge butonul ✕ la capătul din dreapta. */
 .panelhead .iconbtn { margin-left: auto; }
 .draghint { color: var(--muted); font-size: 10px; }
-.panelhead h2 { margin: 0; font-size: 15px; }
+.panelhead h2 { margin: 0; font-size: 15px; font-weight: 600; }
 /* Butoanele mici, doar cu un simbol (✕, ↻): fără chenar, cu fundal la trecerea mouse-ului. */
 .iconbtn {
   background: transparent; border: 0; color: var(--muted);
@@ -434,7 +477,7 @@ code { word-break: break-all; }
   border: 1px solid var(--border); border-radius: 6px;
   padding: 8px; font: 14px/1.2 inherit; width: 100%; min-width: 0;
 }
-.form input:focus, .form select:focus { outline: none; border-color: var(--accent); }
+.form input:focus, .form select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 #aSymbol { font-weight: 600; }
 /* Rândul cu −, câmpul de preț, + și „Preț curent”. */
 .pricebox { display: flex; gap: 4px; }
@@ -449,11 +492,12 @@ code { word-break: break-all; }
   border: 1px solid var(--border); border-radius: 6px;
   padding: 8px 10px; cursor: pointer; font: 600 12px/1 inherit; white-space: nowrap;
 }
-.ghost:hover { border-color: var(--accent); }
+.ghost:hover { border-color: var(--accent); background: rgba(76, 141, 255, .06); }
 .primary {
-  background: var(--accent); color: #fff; border: 0; border-radius: 6px;
-  padding: 10px 14px; cursor: pointer; font: 600 13px/1 inherit;
+  background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+  padding: 10px 14px; cursor: pointer; font: 600 13px/1 inherit; transition: filter .15s;
 }
+.primary:hover:not(:disabled) { filter: brightness(1.1); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 /* Textele explicative mici de sub câmpuri. */
 .hint { font-size: 11px; color: var(--muted); min-height: 14px; }
@@ -524,29 +568,28 @@ code { word-break: break-all; }
 /* ---------- Telefon ---------- */
 /* Regulile de mai jos se aplică doar pe ecrane cu lățimea de cel mult 640px. */
 @media (max-width: 640px) {
-  header { padding: 8px 12px; gap: 8px; }
-  /* Controalele pe un singur rând; butoanele de timeframe se derulează orizontal, fără bară vizibilă. */
+  header { padding: 8px 10px; gap: 8px; }
+  /* Controalele pe un singur rând. */
   .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
-  .symbtn { min-width: 0; max-width: 112px; flex: none; font-size: 13px; padding: 6px; gap: 4px; }
+  .symbtn { min-width: 0; max-width: 112px; flex: none; height: 34px; padding: 0 6px 0 8px; gap: 4px; }
+  .symdesc { display: none; }
   .symrow, .symgroup { padding-top: 9px; padding-bottom: 9px; }
   #symSearch { font-size: 16px; } /* fără zoom automat pe iOS */
-  #source { flex: none; max-width: 84px; font-size: 12px; padding: 6px 4px; }
-  .hsel { flex: none; font-size: 12px; padding: 6px 4px; }
+  #source { flex: none; max-width: 84px; }
+  .hsel { flex: none; height: 34px; font-size: 12px; padding: 0 24px 0 8px; background-position: right 5px center; }
   #chartType { min-width: 0; flex: 1; }
-  /* Pe telefon butonul de alarme arată doar 🔔 și numărul (textul „Alarme” se ascunde). */
-  .alertbtn { flex: none; padding: 6px 8px; gap: 4px; }
-  .alertbtn .btntxt { display: none; }
-  /* Butonul de export rămâne pe rândul controalelor, în dreapta; cotația trece dedesubt. */
-  .controls { width: auto; flex: 1; min-width: 0; }
-  header { padding-right: 12px; }
-  .exportbtn { position: static; flex: none; padding: 6px 8px; }
-  .exportbtn .btntxt { display: none; }
-  .quote { order: 1; }
-  /* Cotația pe o grilă de 3 coloane. */
-  .quote {
-    width: 100%; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 10px;
-  }
-  .px span:last-child { font-size: 18px; }
+  /* Bara pe o grilă de două rânduri: [controale | acțiuni] și [cotație | stare].
+     Butoanele de acțiune arată doar iconițele (textul se ascunde). */
+  header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "ctl act" "quote status"; align-items: center; }
+  .controls { grid-area: ctl; width: auto; min-width: 0; }
+  .hright { display: contents; }
+  .hactions { grid-area: act; gap: 4px; }
+  .hbtn { height: 34px; padding: 0 8px; gap: 3px; }
+  .hbtn .btntxt { display: none; }
+  .quote { grid-area: quote; padding-left: 0; border-left: 0; gap: 14px; }
+  .status { grid-area: status; justify-self: end; height: 26px; padding: 0 10px; }
+  .smeta { display: none; }
+  .px span:last-child { font-size: 17px; }
   .stat span:last-child { font-size: 12px; }
   .lbl { font-size: 9px; }
   #candles { flex: 2.2; }
@@ -565,3 +608,57 @@ code { word-break: break-all; }
   .step { width: 42px; }
   .primary { flex: 1; }
 }
+
+/* ===== Fereastra Strategy Tester (testerwin.js): pagina /tester într-un iframe, peste chart ===== */
+.tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 3px rgba(38, 166, 154, .25); animation: tpulse 1.4s ease-in-out infinite; }
+@keyframes tpulse { 50% { opacity: .35; } }
+.twin {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(5, 7, 10, .55); backdrop-filter: blur(2px);
+}
+.twin[hidden] { display: none; }
+.twinbox {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(1240px, 95vw); height: min(860px, 90vh);
+  display: flex; flex-direction: column;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .02);
+}
+/* După mutare (left / top setate de testerwin.js), fereastra nu mai e centrată prin transform. */
+.twinbox[style*="left"] { transform: none; }
+.twinbox.max { left: 8px !important; top: 8px !important; transform: none; width: calc(100vw - 16px); height: calc(100vh - 16px); }
+.twinhead {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px 8px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--border); cursor: move; user-select: none;
+}
+.twintitle { font-weight: 600; font-size: 14px; }
+.twintitle small { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 12px; }
+.twinstate { margin-left: auto; margin-right: 6px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.twinstate.on { color: var(--up); }
+.twinhead .iconbtn { text-decoration: none; font-size: 15px; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; }
+#testerFrame { flex: 1; width: 100%; border: 0; background: var(--bg); }
+@media (max-width: 760px) {
+  .twinbox, .twinbox.max { left: 0 !important; top: 0 !important; transform: none; width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
+  .twinhead { cursor: default; }
+  .twintitle small, #testerMax { display: none; }
+}
+
+/* ===== Iconițele (SVG cu linie, în locul emoji-urilor) ===== */
+.ico { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.hbtn .ico { color: var(--muted); }
+.hbtn:hover .ico { color: var(--text); }
+.indicon .ico { width: 22px; height: 22px; stroke-width: 1.4; }
+.indicon .ico circle { fill: currentColor; stroke: none; }
+/* Lupa din câmpurile de căutare (simboluri, indicatori). */
+.indsearch {
+  padding-left: 32px;
+  background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237d8696' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='7' cy='7' r='4.5'/%3E%3Cpath d='M10.5 10.5L14 14'/%3E%3C/svg%3E") no-repeat 10px center / 14px;
+}
+
+/* ===== Barele de derulare: subțiri, închise la culoare (în toată pagina) ===== */
+* { scrollbar-width: thin; scrollbar-color: #2e3646 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: #3a4456; }
+::-webkit-scrollbar-corner, ::-webkit-scrollbar-button { display: none; }

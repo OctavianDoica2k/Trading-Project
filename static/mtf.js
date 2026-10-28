@@ -250,7 +250,7 @@ registerIndicator({
   id: "mtf",
   name: "Trend multi-timeframe",
   iconHTML: '<span class="mtfico"><i class="neg"></i><i class="pos"></i><i class="pos"></i><i class="pos weak"></i></span>',
-  icon: "▦",
+  icon: "MTF",
   anyTf: true,
   desc: "1D · 1W · 1M · 1Y — rulează analysis.py pe datastore-ul D1",
   note: "Sursa datelor: datastore-ul D1 al simbolului (zile închise), nu prețul live. Dacă nu există, se creează " +

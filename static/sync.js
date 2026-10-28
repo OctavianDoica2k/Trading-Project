@@ -44,11 +44,11 @@ window.onSyncStatus = (s) => {
       "toate ticurile lipsă, până în prezent. Chartul se reîncarcă singur la 100%.";
     if (state.loaded) setStatus(true, `live · recuperare ${pct}%`);
   } else if (s.state === "error") {
-    text = "⚠ QuestDB nu salvează ticurile noi";
+    text = "QuestDB nu salvează ticurile noi";
     title = s.detail || "";
     if (state.loaded) setStatus(false, "QuestDB nu salvează ticurile");
   } else if (s.state === "stale") {
-    text = `⚠ Colectorul de pe VM nu mai raportează${s.since ? ` (din ${fmtWhen(s.since)})` : ""}`;
+    text = `Colectorul de pe VM nu mai raportează${s.since ? ` (din ${fmtWhen(s.since)})` : ""}`;
     title = "Colectorul e oprit sau blocat: ticurile noi nu se mai salvează. La repornire, golul se recuperează automat.";
   }
   syncBadge.hidden = !text;
