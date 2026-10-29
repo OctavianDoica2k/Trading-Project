@@ -90,7 +90,7 @@ LOGIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nexus – login</title>
+<title>Verax – login</title>
 <style>
   :root { --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #667085; --accent: #2962ff; --err: #d92d20; }
   @media (prefers-color-scheme: dark) {
@@ -109,7 +109,7 @@ LOGIN_PAGE = """<!doctype html>
 </head>
 <body>
 <form method="post" action="/login">
-  <h1>Nexus Live Chart</h1>
+  <h1>Verax Live Chart</h1>
   <p class="err">{error}</p>
   <input type="password" name="password" placeholder="Parola" autocomplete="current-password" autofocus required>
   <button type="submit">Intră</button>

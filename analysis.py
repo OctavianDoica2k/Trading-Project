@@ -12,10 +12,12 @@
 #      curent din datastore (vezi run_mtf din indicators.py); calea de fișier contează doar
 #      când rulezi fișierul de mână, pe calculatorul tău.
 #
-#  Partea 2 (după #----#) -> indicatorii „Linii de trend” și „Medie mobilă”
+#  Partea 2 (după #----#) -> indicatorii „Linii de trend” și „Medie mobilă” (și strategy.py)
 #    - trace(df): găsește vârfurile / văile (pivoturile) și dreptele de trend care le unesc
-#      fără să fie străpunse de prețul de închidere.
+#      fără să fie străpunse de prețul de închidere. Folosește pivoti(high, low) și
+#      drepte_valide(puncte, close, rezistenta), pe care le folosește și strategy.py.
 #    - medie_mobila(df, period, price): media mobilă simplă (SMA) pe `period` lumânări.
+#    - coloana(df, nume): o coloană din df ca vector numpy (citită o singură dată, rapid).
 #
 #  df = tabelul cu lumânări (o lumânare pe rând), cu coloanele open / high / low / close
 #  (plus time_utc în partea 1). Rândul 0 = cea mai veche lumânare, ultimul = cea mai nouă.
@@ -92,82 +94,96 @@ def timeframe_trends_indicator(df):
 #print(a,b,c,d)
 #-------------------------------------------------------------------------------#
 # ^ Linia de mai sus desparte partea 1 de partea 2. NU o șterge și NU o modifica.
-
-# Găsește liniile de trend „valide” pe lumânările din df.
 #
+# Partea 2 e scrisă pentru viteză: lumânările se citesc o singură dată ca vectori numpy (coloana),
+# iar comparațiile se fac pe vectori întregi. Rezultatele sunt aceleași ca la varianta lumânare cu
+# lumânare (aceleași formule, aceleași operații în virgulă mobilă).
+import numpy as np
+
+
+# Coloana `nume` ('open', 'high', 'low', 'close' ...) din df, ca vector numpy de numere.
+# Merge pe un DataFrame pandas (df[nume]) și pe tabelele simple ale serverului / testerului, care
+# știu doar len(df) și df.iloc[i][nume].
+def coloana(df, nume):
+    if hasattr(df, 'columns'):
+        return df[nume].to_numpy(dtype=np.float64)
+    return np.array([df.iloc[i][nume] for i in range(len(df))], dtype=np.float64)
+
+
 # Pasul 1 - pivoturile:
 #   - un MAXIM (vârf) e o lumânare al cărei high e cel puțin la fel de mare ca high-ul
 #     celor 3 lumânări de după și strict mai mare decât al celor 3 lumânări de dinainte;
 #   - un MINIM (vale) e la fel, dar cu low: cel mult cât celelalte 3 de după și strict mai
 #     mic decât cele 3 de dinainte.
-#   Fiecare pivot se ține ca (poziția lumânării în df, prețul).
-#
+#   Se verifică lumânările 3 ... n-4 (fiecare are 3 vecine în stânga și 3 în dreapta), toate
+#   deodată: pentru fiecare distanță d = 1, 2, 3 comparăm vectorul cu el însuși decalat cu d.
+# Întoarce (maxim, minim): liste de (poziția lumânării, prețul), în ordinea pozițiilor.
+def pivoti(high, low):
+    n = len(high)
+    if n < 7:
+        return [], []
+    g = np.arange(3, n - 3)
+    e_max = np.ones(len(g), dtype=bool)
+    e_min = np.ones(len(g), dtype=bool)
+    for d in (1, 2, 3):
+        e_max &= (high[g] >= high[g + d]) & (high[g] > high[g - d])
+        e_min &= (low[g] <= low[g + d]) & (low[g] < low[g - d])
+    maxim = [(int(i), high[i]) for i in g[e_max]]
+    minim = [(int(i), low[i]) for i in g[e_min]]
+    return maxim, minim
+
+
 # Pasul 2 - dreptele:
-#   Luăm fiecare pereche de maxime (i, j) și ducem dreapta prin cele două puncte. Dreapta e
-#   VALIDĂ dacă, de la primul vârf până la ultima lumânare, nicio închidere nu trece PESTE
-#   ea (dreapta de rezistență nu a fost spartă). La minime e invers: nicio închidere nu
-#   coboară SUB dreaptă (suportul nu a fost spart).
-#
-# Întoarce două liste de perechi (i, j): indicii pivoturilor din `maxim` / `minim` care
-# formează drepte valide. indicators.py citește și listele interne maxim / minim, ca să
-# știe unde sunt punctele pe chart.
+#   Luăm fiecare pereche de pivoturi (i, j) și ducem dreapta prin cele două puncte, scrisă ca:
+#     preț(l) = (l - k) / m + n,  k = poziția primului pivot, n = prețul lui,
+#     m = câte lumânări „costă” o unitate de preț (inversul pantei: Δpoziție / Δpreț).
+#   Dacă două pivoturi au exact același preț, m = inf și dreapta e orizontală (preț(l) = n).
+#   rezistenta=True (vârfuri): dreapta e VALIDĂ dacă, de la primul pivot până la ultima lumânare,
+#   nicio închidere nu trece PESTE ea. rezistenta=False (văi): nicio închidere nu coboară SUB ea.
+#   Pentru un pivot i, toate dreptele (i, j) se verifică deodată, pe bucăți de lumânări tot mai
+#   lungi; o dreaptă spartă nu se mai verifică mai departe (cele mai multe se sparg repede).
+# Întoarce lista perechilor (i, j) valide (indici în `puncte`), în ordinea (i, apoi j).
+def drepte_valide(puncte, close, rezistenta):
+    valide = []
+    N = len(close)
+    x = np.array([p[0] for p in puncte], dtype=np.int64)
+    y = np.array([p[1] for p in puncte], dtype=np.float64)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        for i in range(len(puncte) - 1):
+            k, n = x[i], y[i]
+            m = (x[i + 1:] - k) / (y[i + 1:] - n)
+            vii = np.arange(len(m))              # dreptele (i, i+1+vii) încă nesparte
+            start, pas = k + 1, 32
+            while len(vii) and start < N:
+                l = np.arange(start, min(N, start + pas))
+                v = (l[None, :] - k) / m[vii, None] + n
+                spart = (v < close[l]) if rezistenta else (v > close[l])
+                vii = vii[~spart.any(axis=1)]
+                start, pas = start + pas, pas * 2
+            valide += [(i, i + 1 + int(j)) for j in vii]
+    return valide
+
+
+# Găsește liniile de trend „valide” pe lumânările din df (pivoturile de la pasul 1, dreptele de
+# la pasul 2). Întoarce două liste de perechi (i, j): indicii pivoturilor din `maxim` / `minim`
+# care formează drepte valide. indicators.py citește și listele interne maxim / minim, ca să
+# știe unde sunt punctele pe chart (de aceea au aceste nume și funcția are un singur return).
 def trace(df):
-    maxim = []   # vârfurile găsite: (poziția lumânării, high)
-    minim = []   # văile găsite: (poziția lumânării, low)
-    # Începem de la a 4-a lumânare și ne oprim cu 3 înainte de final, ca fiecare lumânare
-    # verificată să aibă 3 vecine în stânga și 3 în dreapta.
-    i = 3
-    while i < len(df)-3:
-        # Vârf: high-ul lumânării i e cel mai mare dintre cele 7 lumânări (i-3 ... i+3).
-        if df.iloc[i]['high'] >= df.iloc[i+1]['high'] and df.iloc[i]['high'] >= df.iloc[i+2]['high'] and df.iloc[i]['high'] >= df.iloc[i+3]['high'] and df.iloc[i]['high'] > df.iloc[i-1]['high'] and df.iloc[i]['high'] > df.iloc[i-2]['high'] and df.iloc[i]['high'] > df.iloc[i-3]['high']:
-           maxim.append((i, df.iloc[i]['high']))
-
-        # Vale: low-ul lumânării i e cel mai mic dintre cele 7 lumânări (i-3 ... i+3).
-        if df.iloc[i]['low'] <= df.iloc[i+1]['low'] and df.iloc[i]['low'] <= df.iloc[i+2]['low'] and df.iloc[i]['low'] <= df.iloc[i+3]['low'] and df.iloc[i]['low'] < df.iloc[i-1]['low'] and df.iloc[i]['low'] < df.iloc[i-2]['low'] and df.iloc[i]['low'] < df.iloc[i-3]['low']:
-            minim.append((i, df.iloc[i]['low']))
-        i+=1
-
-    # ---- Dreptele de rezistență (prin două vârfuri) ----
-    # Dreapta prin punctele (k, n) și (x2, y2), scrisă ca: preț(l) = (l - k) / m + n, unde
-    #   k = poziția primului vârf, n = prețul lui,
-    #   m = câte lumânări „costă” o unitate de preț (inversul pantei: Δpoziție / Δpreț).
-    # Dacă două vârfuri au exact același preț, m împarte la 0 (pe server dă inf, fără eroare).
-    dr_max_valid = []
-    for i in range(len(maxim)):
-        for j in range(i+1, len(maxim), 1):
-            n = maxim[i][1]
-            m = (maxim[j][0] - maxim[i][0]) / (maxim[j][1] - maxim[i][1])
-            k = maxim[i][0]
-            valid = 1
-            # Verificăm toate lumânările de după primul vârf: dacă vreo închidere e peste
-            # dreaptă, dreapta a fost spartă și nu mai e validă.
-            for l in range(maxim[i][0] + 1, len(df), 1):
-                if (l-k)/m + n < df.iloc[l]['close']: valid = 0
-            if valid == 1: dr_max_valid.append((i,j))
-
-
-    # ---- Dreptele de suport (prin două văi) ----
-    # Aceeași formulă ca mai sus, dar dreapta e spartă când o închidere coboară SUB ea.
-    dr_min_valid = []
-    for i in range(len(minim)):
-        for j in range(i+1, len(minim), 1):
-            n = minim[i][1]
-            m = (minim[j][0] - minim[i][0]) / (minim[j][1] - minim[i][1])
-            k = minim[i][0]
-            valid = 1
-            for l in range(minim[i][0] + 1, len(df), 1):
-                if (l-k)/m + n > df.iloc[l]['close']: valid = 0
-            if valid == 1: dr_min_valid.append((i,j))
-
+    high, low, close = coloana(df, 'high'), coloana(df, 'low'), coloana(df, 'close')
+    maxim, minim = pivoti(high, low)
+    dr_max_valid = drepte_valide(maxim, close, True)     # rezistențe (prin două vârfuri)
+    dr_min_valid = drepte_valide(minim, close, False)    # suporturi (prin două văi)
     return dr_max_valid, dr_min_valid
+
 
 # Media mobilă simplă (SMA): pentru fiecare lumânare, media prețului `price` ('open', 'high',
 # 'low' sau 'close') pe ultimele `period` lumânări (inclusiv ea).
 # Întoarce o listă cu o valoare pentru fiecare lumânare din df; primele period-1 lumânări nu
 # au destule lumânări în spate, deci primesc None (nu se desenează).
 def medie_mobila(df, period, price):
+    x = coloana(df, price).tolist()          # numere Python: citire rapidă, aceleași calcule
     sma_vals = []
-    for i in range(len(df)):
+    for i in range(len(x)):
 
         # Prea devreme: nu avem încă `period` lumânări.
         if i < period-1: sma_vals.append(None)
@@ -176,12 +192,12 @@ def medie_mobila(df, period, price):
         elif i == period-1:
             val = 0
             for j in range(period):
-                val += df.iloc[j][price]
+                val += x[j]
             sma_vals.append(val/period)
 
         # Următoarele medii, fără să adunăm din nou tot: pornim de la suma anterioară
         # (media anterioară * period), adăugăm prețul nou și scădem prețul care a ieșit din
         # fereastră (cel de acum `period` lumânări), apoi împărțim din nou la period.
-        else: sma_vals.append((sma_vals[-1]*period+df.iloc[i][price]-df.iloc[i-period][price])/period)
+        else: sma_vals.append((sma_vals[-1]*period+x[i]-x[i-period])/period)
 
     return sma_vals

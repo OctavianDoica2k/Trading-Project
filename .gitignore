@@ -1,17 +1,29 @@
+# --- Date secrete și personale: rămân doar pe calculatorul tău ---
 .env
-alerts.json
-alerts.tmp
-__pycache__/
+.env.*
+!.env.example
+*.bak*
 vapid_private.pem
-push_subscriptions.json
-push_subscriptions.tmp
+session_secret.key
 ctrader_token.json
 ctrader_token.tmp
+ctrader_token_vm.json
+alerts.json
+alerts.tmp
+push_subscriptions.json
+push_subscriptions.tmp
+.claude/settings.local.json
+
+# --- Date generate și jurnale ---
+__pycache__/
 exporturi_csv/
 datastore/
-videoclipuri_explicative/structura_proiectului.mp4
-ctrader_token_vm.json
-collector.log*
-session_secret.key
-server_stdout.log
 tester_cache/
+collector.log*
+server_stdout.log
+*.prof
+slow.out
+
+# --- Videoclipuri care nu se publică ---
+videoclipuri_explicative/structura_proiectului.mp4
+videoclipuri_explicative/verax_promo_linkedin*

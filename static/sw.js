@@ -22,7 +22,7 @@ self.addEventListener("push", (event) => {
   let data = {};
   // Dacă mesajul nu e JSON valid, îl afișăm ca text simplu.
   try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data && event.data.text() }; }
-  const title = data.title || "Nexus";
+  const title = data.title || "Verax";
   // Afișăm notificarea în sistem (centrul de notificări Windows / bara de notificări Android).
   event.waitUntil(self.registration.showNotification(title, {
     body: data.body || "",

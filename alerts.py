@@ -70,8 +70,8 @@ class Mailer:
         # Adresa expeditorului; dacă nu e dată separat, e chiar contul cu care ne logăm.
         self.sender = os.getenv("SMTP_FROM", "").strip() or self.user
         self.security = os.getenv("SMTP_SECURITY", "starttls").strip().lower()  # starttls | ssl | none
-        # Numele afișat la „De la” (ex. „Nexus Alerts <adresa@gmail.com>”).
-        self.sender_name = os.getenv("SMTP_FROM_NAME", "Nexus Alerts").strip()
+        # Numele afișat la „De la” (ex. „Verax Alerts <adresa@gmail.com>”).
+        self.sender_name = os.getenv("SMTP_FROM_NAME", "Verax Alerts").strip()
 
     # @property = se folosește ca un atribut (mailer.configured), dar e calculat la fiecare citire.
     # E-mailul e considerat configurat dacă avem cel puțin serverul și adresa expeditorului.
@@ -139,7 +139,7 @@ class Mailer:
             '<div style="max-width:520px;margin:auto;background:#fff;border-radius:8px;padding:20px 24px">'
             f'<h2 style="margin:0 0 14px;font-size:18px">{html.escape(subject)}</h2>'
             f'<table style="border-collapse:collapse;font-size:14px">{"".join(rows)}</table>'
-            '<p style="margin:18px 0 0;font-size:12px;color:#888">Trimis automat de aplicația Nexus Live Chart '
+            '<p style="margin:18px 0 0;font-size:12px;color:#888">Trimis automat de aplicația Verax Live Chart '
             'pentru o alarmă de preț setată de tine.</p>'
             '</div></body></html>'
         )
@@ -313,7 +313,7 @@ class AlertStore:
         d = alert.get("digits", 5)
         price, hit = f"{alert['price']:.{d}f}", f"{alert['trigger_price']:.{d}f}"
         word = "a urcat la" if alert["direction"] == "above" else "a coborât la"
-        subject = f"Alarmă Nexus: {alert['symbol']} {word} {price}"
+        subject = f"Alarmă Verax: {alert['symbol']} {word} {price}"
         # Textul e aliniat pe coloane; în varianta HTML devine un tabel (vezi Mailer._html).
         body = (
             f"Alarma de preț s-a declanșat.\n\n"

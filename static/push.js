@@ -12,8 +12,6 @@
 //  Fiecare pas e afișat sub butoane (în elementul #pushHint), ca să se vadă unde s-a oprit.
 // =====================================================================================
 
-// Adresa HTTPS prin Tailscale, recomandată când pagina e deschisă pe o adresă fără HTTPS.
-const HTTPS_URL = "https://calculator.tailnet.ts.net";
 // Are browserul tot ce trebuie? Service worker + Push API + Notification API.
 const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 let pushSub = null;   // abonamentul acestui browser, dacă există
@@ -62,9 +60,10 @@ function renderPush(state, hint = "") {
 async function refreshPush() {
   // „Context securizat” = pagină pe HTTPS sau pe localhost. Altfel browserul interzice push-ul.
   if (!window.isSecureContext) {
-    renderPush("unsupported",
-      `Notificările push cer HTTPS. Deschide aplicația la <a href="${HTTPS_URL}">${HTTPS_URL.replace("https://", "")}</a>` +
-      " (sau pe acest PC la http://localhost:8000).");
+    // Adresa HTTPS recomandată vine de la server (HTTPS_URL din .env); fără ea, doar sfatul general.
+    const { httpsUrl } = await api("GET", "/api/push/key").catch(() => ({}));
+    const where = httpsUrl ? `la <a href="${httpsUrl}">${httpsUrl.replace("https://", "")}</a>` : "pe o adresă HTTPS (ex. Tailscale Serve sau ngrok)";
+    renderPush("unsupported", `Notificările push cer HTTPS. Deschide aplicația ${where} (sau pe acest PC la http://localhost:8000).`);
     return;
   }
   if (!pushSupported) {

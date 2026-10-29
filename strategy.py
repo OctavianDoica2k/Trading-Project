@@ -1,21 +1,37 @@
-from analysis import medie_mobila, trace
+from analysis import coloana, drepte_valide, medie_mobila, pivoti
+
+import numpy as np
+
 
 # df = doar lumânări ÎNCHISE; ultimul rând = lumânarea precedentă (shift 1 în EA-ul MT5).
 def verify_entry(df, period, price):
     sma = medie_mobila(df, period, price)
     if sma[-1] is None: return 'stay'
+    close = coloana(df, 'close')
     sma_direction = 'stay'
-    if df.iloc[len(df)-1]['close'] < sma[-1]: sma_direction = 'sell'
-    elif df.iloc[len(df)-1]['close'] > sma[-1]: sma_direction = 'buy'
-    df2 = df.iloc[:-1]
+    if close[-1] < sma[-1]: sma_direction = 'sell'
+    elif close[-1] > sma[-1]: sma_direction = 'buy'
 
-    dr_max_valid, dr_min_valid = trace(df)
-    dr_max_valid2, dr_min_valid2 = trace(df2)
+    # O linie validă înainte de ultima lumânare și spartă de închiderea ei = semnal.
+    # Liniile valide pe df fără ultima lumânare (df2) sunt cele din trace(df2). Pe df complet,
+    # pivoturile sunt aceleași (plus, eventual, unul nou la final), deci o linie din df2 dispare
+    # din trace(df) doar dacă ultima închidere o trece: ajunge un singur trace, pe df2, și
+    # verificarea ultimei închideri (același rezultat ca set(trace(df2)) - set(trace(df))).
+    high, low = coloana(df, 'high')[:-1], coloana(df, 'low')[:-1]
+    maxim, minim = pivoti(high, low)
+    last = len(close) - 1
 
-    # O linie validă înainte de ultima lumânare și dispărută după ea = spartă de închiderea ei.
+    def sparta(puncte, perechi, rezistenta):
+        with np.errstate(divide='ignore'):
+            for i, j in perechi:
+                (k, n), (x2, y2) = puncte[i], puncte[j]
+                v = (last - k) / ((x2 - k) / (y2 - n)) + n      # dreapta la ultima lumânare
+                if (v < close[-1]) if rezistenta else (v > close[-1]): return True
+        return False
+
     trend_direction = 'stay'
-    if set(dr_max_valid2) - set(dr_max_valid): trend_direction = 'buy'
-    elif set(dr_min_valid2) - set(dr_min_valid): trend_direction = 'sell'
+    if sparta(maxim, drepte_valide(maxim, close[:-1], True), True): trend_direction = 'buy'
+    elif sparta(minim, drepte_valide(minim, close[:-1], False), False): trend_direction = 'sell'
 
     if trend_direction == sma_direction: return trend_direction
     return 'stay'

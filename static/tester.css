@@ -210,6 +210,70 @@ table.inputs { border-collapse: collapse; width: 100%; }
 .inputs tr.changed td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 .inputs tr.changed input, .inputs tr.changed select { border-color: rgba(76, 141, 255, .6); }
 
+/* Coloanele de optimizare: doar cu optimizarea pornită (Setări). */
+body:not(.opt-on) .o { display: none !important; }
+body.opt-on .inputs td:nth-child(2) { width: 150px; }
+.inputs th.o, .inputs td.o { width: 104px; padding-left: 6px; padding-right: 6px; }
+.inputs th.o:first-of-type, .inputs td.o.chk { width: 92px; text-align: center; }
+.inputs td.o input, .inputs td.o select { width: 100%; min-width: 0; height: 30px; padding: 0 8px; }
+.inputs td.o select { padding: 0 2px 0 7px; }
+.inputs td.o.r, .inputs th.o.r { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; width: 64px; }
+.inputs td.o.r[title]:not([title=""]) { cursor: help; text-decoration: underline dotted rgba(255, 255, 255, .2); text-underline-offset: 3px; }
+.inputs td.o.dash { color: var(--faint); text-align: center; }
+.inputs td.o.fixed { color: var(--muted); font-size: 12px; }
+/* Rândurile optimizate: bară mov în stânga; valoarea lor (coloana Valoare) nu se folosește, deci e estompată. */
+.inputs tr.opt td:first-child { box-shadow: inset 2px 0 0 var(--load); }
+body.opt-on .inputs tr.opt td:nth-child(2) > * { opacity: .38; }
+.inputs tr:not(.opt) td.o:not(.chk) > *, .inputs tr:not(.opt) td.o.fixed { opacity: .3; pointer-events: none; }
+.inputs tr.bad td.o input { border-color: rgba(239, 83, 80, .7); }
+.inputs tr.bad td.o.r { color: var(--down); }
+/* Comutator (în loc de bifa simplă). */
+.switch { position: relative; display: inline-block; width: 32px; height: 18px; vertical-align: middle; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.switch i { position: absolute; inset: 0; border-radius: 99px; background: #2a3140; border: 1px solid var(--border); transition: background .15s, border-color .15s; pointer-events: none; }
+.switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #8791a3; transition: transform .15s, background .15s; }
+.switch input:checked + i { background: rgba(176, 124, 255, .35); border-color: var(--load); }
+.switch input:checked + i::after { transform: translateX(14px); background: #fff; }
+.switch input:focus-visible + i { box-shadow: 0 0 0 3px var(--accent-soft); }
+/* Bara cu numărul de combinații (sub tabel). */
+.combos { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin: 14px 0 0; padding: 12px 16px; border-radius: 9px;
+  background: linear-gradient(90deg, rgba(176, 124, 255, .08), transparent 60%), var(--bg); border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.combos .ctotal { display: flex; align-items: baseline; gap: 7px; }
+.combos .ctotal b { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.combos .ctotal span { color: var(--muted); }
+.combos .cparts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.combos .cpart { display: inline-flex; gap: 6px; padding: 2px 9px; border-radius: 99px; background: var(--raised); border: 1px solid var(--border); font-size: 12px; }
+.combos .cpart em { font-style: normal; color: var(--muted); }
+.combos .x { color: var(--faint); }
+.combos .cplan { margin-left: auto; color: var(--muted); font-size: 12px; }
+.combos .cempty { color: var(--muted); }
+.inputs tr.changed input:not([data-o]), .inputs tr.changed select:not([data-o]) { color: #8fb6ff; }
+
+/* Setări → Optimizare. */
+#sOptCard .cardhead { margin-bottom: 12px; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-size: 12.5px; }
+.linkbtn:hover { text-decoration: underline; }
+#sOptModes .meters span { color: var(--muted); font-variant-numeric: tabular-nums; }
+#sOptModes .mode.on .meters span { color: var(--text); }
+.optsettings { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; margin-top: 14px; }
+.optsettings .field { margin-top: 0; }
+#sOptCard.off .optsettings { opacity: .45; pointer-events: none; }
+.ostats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.ostats:empty { display: none; }
+.ostat { padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border-soft); min-width: 0; }
+.ostat span { display: block; color: var(--muted); font-size: 11.5px; }
+.ostat b { display: block; font-size: 17px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ostat small { display: block; color: var(--faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.onotes { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.onotes:empty { display: none; }
+.onote { color: var(--muted); font-size: 12.5px; padding-left: 12px; position: relative; }
+.onote::before { content: ""; position: absolute; left: 0; top: 7px; width: 4px; height: 4px; border-radius: 50%; background: var(--faint); }
+.onote b { color: var(--text); font-weight: 500; }
+.onote span { color: var(--text); }
+.onote.warn { color: #f0b35a; }
+.onote.warn::before { background: #f0b35a; }
+.onote a { color: var(--accent); }
+
 /* ---------- KPI-uri ---------- */
 .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .kpis:empty { display: none; }
@@ -261,6 +325,139 @@ table.mini { border-collapse: collapse; width: 100%; margin-top: 10px; font-size
 .mini th, .mini td { padding: 6px 10px; border-bottom: 1px solid var(--border-soft); text-align: left; }
 .mini th { color: var(--faint); font-weight: 500; }
 
+/* ---------- Optimizare ---------- */
+#oEmpty:not([hidden]) { display: flex !important; }
+#oResult .graphcard { display: block !important; margin-bottom: 14px; }
+.okpis { margin-bottom: 14px; }
+.empty .steps { margin: 10px 0 0; padding-left: 18px; text-align: left; line-height: 1.8; }
+.empty .steps b { color: var(--text); font-weight: 500; }
+
+/* Progresul live. */
+.olive { margin-bottom: 14px; border-color: rgba(176, 124, 255, .35); background: linear-gradient(180deg, rgba(176, 124, 255, .06), transparent 70%), var(--card); }
+.olivehead { display: flex; align-items: center; gap: 10px; }
+.olivehead b { font-size: 15px; font-weight: 600; }
+.olivehead .muted { margin-left: auto; font-variant-numeric: tabular-nums; }
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--load); box-shadow: 0 0 0 0 rgba(176, 124, 255, .6); animation: pulse 1.6s infinite; }
+@keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(176, 124, 255, 0); } 100% { box-shadow: 0 0 0 0 rgba(176, 124, 255, 0); } }
+.olivebar { height: 6px; margin: 12px 0 14px; background: var(--raised); border-radius: 99px; overflow: hidden; }
+.olivebar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--load), #c9a4ff); border-radius: 99px; transition: width .35s; }
+.olivestats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.olivestats div { padding: 8px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border-soft); }
+.olivestats span { display: block; color: var(--muted); font-size: 11.5px; }
+.olivestats b { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.olivestats small { color: var(--faint); font-weight: 400; font-size: 12px; }
+.olivebest { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.olivebest:empty { display: none; }
+
+/* Parametrii ca etichete (cel mai bun set, testul rulat). */
+.pchips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.pchip { display: inline-flex; gap: 6px; align-items: baseline; padding: 3px 10px; border-radius: 99px; background: var(--raised);
+  border: 1px solid var(--border); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pchip em { font-style: normal; color: var(--muted); font-size: 11.5px; }
+
+/* Cel mai bun set. */
+.obest { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; padding: 14px 18px;
+  border-color: rgba(38, 166, 154, .3); background: linear-gradient(90deg, rgba(38, 166, 154, .07), transparent 55%), var(--card); }
+.obest:empty { display: none; }
+.obestl { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.olabel { color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.obestn { display: flex; gap: 22px; margin-left: auto; }
+.obestn span { display: block; color: var(--muted); font-size: 11.5px; }
+.obestn b { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: #6aa0ff; border-color: #6aa0ff; }
+
+/* Graficul. */
+.olegend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 12px; }
+.olegend span { display: inline-flex; align-items: center; gap: 7px; }
+.olegend b { font-weight: 400; color: var(--muted); }
+.olegend .dot { width: 7px; height: 7px; border-radius: 2px; }
+.olegend .dot.p { background: rgba(76, 141, 255, .8); }
+.olegend .dot.l { background: rgba(125, 134, 150, .6); }
+.olegend .ln { width: 16px; height: 2px; border-radius: 2px; background: var(--eq); }
+.olegend .ln.dash { background: repeating-linear-gradient(90deg, rgba(255, 255, 255, .35) 0 3px, transparent 3px 6px); }
+.axis { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.axis select { height: 28px; width: auto; min-width: 150px; }
+.ographwrap { position: relative; height: 250px; }
+#oCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+
+/* Bara de deasupra tabelului: filtre, perioada testului complet, CSV. */
+.otools { display: flex; align-items: center; gap: 12px 18px; flex-wrap: wrap; margin-bottom: 10px; }
+.chips button .cnt { margin-left: 7px; padding: 0 6px; border-radius: 99px; background: rgba(255, 255, 255, .06); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chips button.on .cnt { background: rgba(76, 141, 255, .25); color: var(--text); }
+.oper { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; font-size: 12.5px; }
+.seg.small { padding: 2px; }
+.seg.small button { height: 24px; padding: 0 10px; flex: none; font-size: 12px; }
+.seg button:disabled { opacity: .35; cursor: default; }
+
+/* Tabelul: grupuri de coloane (perioada optimizată · parametri · forward). */
+.otablewrap { max-height: calc(100vh - 190px); }
+.otable th, .otable td { padding: 7px 9px; }
+/* Titlurile din două cuvinte trec pe două rânduri, ca tabelul să încapă în fereastra testerului. */
+.otable thead tr:nth-child(2) th { white-space: normal; line-height: 1.25; vertical-align: bottom; }
+#tab-opt.pane { max-width: 1480px; }
+.otable thead tr.grp th { top: 0; height: 26px; padding-top: 6px; padding-bottom: 2px; font-size: 10.5px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--faint); background: var(--panel); cursor: default; text-align: center; border-bottom: 0; }
+.otable thead tr:nth-child(2) th { top: 26px; }
+.otable thead tr.grp th.g-par { color: #b99af0; }
+.otable thead tr.grp th.g-fwd { color: #77cfc5; }
+.otable th { cursor: pointer; user-select: none; }
+.otable thead tr:nth-child(2) th:hover { color: var(--text); }
+.otable th.sorted { color: var(--text); }
+.otable th.sorted::after { content: "\00a0▾"; color: var(--accent); }
+.otable th.sorted.asc::after { content: "\00a0▴"; }
+.otable .gs { box-shadow: inset 1px 0 0 var(--border); }
+.otable td.g-par { color: #c7b3ee; background: rgba(176, 124, 255, .035); }
+.otable td.g-fwd { background: rgba(38, 166, 154, .035); }
+.otable td.g-id { color: var(--muted); }
+.otable tbody tr { cursor: pointer; }
+.otable tbody tr:hover td { background: rgba(76, 141, 255, .08); }
+.otable tr.top td { background: rgba(38, 166, 154, .07); }
+.otable tr.sel td { background: rgba(76, 141, 255, .18) !important; box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.otable tr.sel td.gs { box-shadow: inset 1px 0 0 var(--border), inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.otable .star { color: var(--eq); margin-right: 5px; }
+.ocount { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 8px 14px;
+  border-top: 1px solid var(--border-soft); color: var(--faint); font-size: 12px; }
+.ocount .btn { height: 28px; }
+.orunhint { margin: -2px 2px 10px; color: var(--muted); font-size: 12.5px; }
+.orunhint b { color: var(--text); font-weight: 500; }
+.orunhint .ok { color: #6fd3c8; }
+.orunhint .warn { color: #f0b35a; }
+/* Butoanele rândului: apar peste capătul din dreapta al rândului de sub mouse (și al celui selectat). */
+.otablewrap { position: relative; }
+.rowact { position: absolute; z-index: 3; display: flex; gap: 3px; padding: 3px; border-radius: 8px;
+  background: rgba(22, 27, 36, .97); border: 1px solid #323b4b; box-shadow: 0 6px 20px rgba(0, 0, 0, .5); }
+.rowact button { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 6px; border: 0;
+  background: none; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.rowact button:hover { color: var(--text); background: var(--raised); }
+.rowact button svg { width: 9px; height: 9px; fill: currentColor; stroke: none; }
+.rowact button.real { color: #fff; background: var(--accent); font-weight: 600; }
+.rowact button.real:hover { background: #6aa0ff; }
+.rowact button:disabled { opacity: .4; cursor: default; }
+/* Testele complete deja rulate pentru un rând: OP / M1 / RT, verde = profit, roșu = pierdere. */
+.rbadge { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 16px;
+  letter-spacing: .03em; vertical-align: 1px; cursor: help; border: 1px solid; }
+.rbadge.up { color: #6fd3c8; border-color: rgba(38, 166, 154, .45); background: rgba(38, 166, 154, .12); }
+.rbadge.down { color: #ff8a87; border-color: rgba(239, 83, 80, .45); background: rgba(239, 83, 80, .12); }
+.rbadge.flat { color: var(--muted); border-color: var(--border); }
+/* Cel mai bun set: testul complet pe Open prices / Real ticks. */
+.obestrun { display: flex; align-items: center; gap: 6px; }
+.obestrun > span { color: var(--muted); font-size: 12px; margin-right: 4px; }
+/* Bara „testul din optimizare” (Grafic / Backtest): modelling-ul și comparația între modelling-uri. */
+.mtag { padding: 1px 8px; border-radius: 99px; font-size: 11.5px; font-weight: 600; background: var(--accent-soft); color: #8fb6ff; border: 1px solid rgba(76, 141, 255, .4); }
+.mtag.real { background: rgba(76, 141, 255, .25); color: #fff; }
+.fcmp { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.fcmp span { padding: 2px 9px; border-radius: 99px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fcmp span.cur { border-color: rgba(76, 141, 255, .5); color: var(--text); }
+.fcmp b { font-weight: 600; }
+.fcmp .d { margin-left: 4px; color: var(--faint); }
+
+/* Grafic / Backtest: testul vine din optimizare. */
+.frombar { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin-bottom: 12px; padding: 9px 14px; border-radius: 9px;
+  background: rgba(76, 141, 255, .07); border: 1px solid rgba(76, 141, 255, .25); font-size: 12.5px; }
+.frombar .ftag { font-weight: 600; }
+.frombar .linkbtn { margin-left: auto; }
+
 /* ---------- Tranzacții ---------- */
 .dealbar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
 .dealbar .btn { margin-left: auto; }
@@ -300,6 +497,9 @@ body:not(.has-result) .graphcard, body:not(.has-result) #tab-deals .card, body:n
 @media (max-width: 1000px) {
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .modes { grid-template-columns: 1fr; }
+  .ostats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .obestn { margin-left: 0; }
+  .oper { margin-left: 0; }
 }
 @media (max-width: 760px) {
   .pane { padding: 12px; }
@@ -317,6 +517,10 @@ body:not(.has-result) .graphcard, body:not(.has-result) #tab-deals .card, body:n
   .inputs td:nth-child(2) { width: 130px; }
   input, select { font-size: 16px; }
   .rgrid { grid-template-columns: 1fr; }
+  .optsettings { grid-template-columns: 1fr; gap: 10px; }
+  .olivestats { grid-template-columns: 1fr; }
+  .combos .cplan { margin-left: 0; }
+  .oper { flex-wrap: wrap; }
 }
 
 /* ---------- Barele de derulare: subțiri, închise la culoare, fără săgeți ---------- */

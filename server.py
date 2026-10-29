@@ -553,9 +553,10 @@ class PushEndpointIn(BaseModel):
 
 
 # Cheia publică VAPID: browserul are nevoie de ea ca să se aboneze la notificările noastre.
+# httpsUrl (HTTPS_URL din .env, opțional) = adresa HTTPS recomandată când pagina e deschisă fără HTTPS.
 @app.get("/api/push/key")
 async def push_key():
-    return {"publicKey": push.public_key}
+    return {"publicKey": push.public_key, "httpsUrl": os.getenv("HTTPS_URL", "").strip()}
 
 
 # Salvează (sau actualizează) abonamentul unui dispozitiv.
@@ -593,7 +594,7 @@ async def push_test(p: PushEndpointIn):
     # asyncio.to_thread rulează trimiterea (care așteaptă răspunsul unui server extern) într-un
     # fir separat, ca serverul web să rămână liber pentru celelalte cereri între timp.
     ok = await asyncio.to_thread(push.send, p.endpoint, {
-        "title": "Nexus: notificare de test",
+        "title": "Verax: notificare de test",
         "body": "Notificările push funcționează pe acest dispozitiv.",
         "tag": "nexus-test", "url": "/",
     })
@@ -610,8 +611,8 @@ async def test_email(t: TestEmailIn):
     try:
         # Trimiterea prin SMTP poate dura câteva secunde, deci o facem într-un fir separat.
         await asyncio.to_thread(
-            alerts.mailer.send, t.email.strip(), "Nexus: e-mail de test pentru alarme",
-            "Acesta este un e-mail de test trimis din aplicația Nexus Live Chart.\n\n"
+            alerts.mailer.send, t.email.strip(), "Verax: e-mail de test pentru alarme",
+            "Acesta este un e-mail de test trimis din aplicația Verax Live Chart.\n\n"
             "Dacă îl primești, notificările pentru alarmele de preț funcționează.\n"
             "Când o alarmă se declanșează, vei primi un mesaj cu simbolul, prețul țintă, "
             "prețul atins și ora exactă.\n")
@@ -1478,10 +1479,11 @@ tester_mgr = None
 
 
 class TestIn(BaseModel):
-    kind: str = "run"          # "run" = backtest, "verify" = compară copia rapidă cu strategy.py
+    kind: str = "run"          # "run" = backtest, "verify" = compară copia rapidă cu strategy.py, "optimize"
     settings: dict
     inputs: dict
     samples: int = 10
+    opt: dict = {}             # optimizarea: mode (genetic / complete), criterion, params (vezi optimizer.py)
 
 
 @app.get("/tester")
@@ -1499,13 +1501,41 @@ async def tester_info():
         rows = feed.db.query(f"SELECT symbol, min(day), max(day) FROM tick_coverage WHERE source = '{PRICE_SOURCE}' "
                              "AND status = 'complete' GROUP BY symbol")
         return {r[0]: {"first": r[1][:10], "last": r[2][:10]} for r in rows}
+    global tester_pool
+    if tester_pool is None:
+        # Procesul testerului pornește odată cu pagina și își încarcă funcțiile compilate (numba),
+        # ca primul test să nu aștepte după ele.
+        tester_pool = ProcessPoolExecutor(max_workers=1)
+        tester_pool.submit(backtester.warmup)
     try:
         cov = await asyncio.to_thread(coverage)
     except Exception as e:  # noqa: BLE001 - pagina afișează eroarea
         raise HTTPException(503, f"QuestDB indisponibil: {e}") from e
+    running = next((j for j in TESTS.values() if j["status"] == "running"), None)
+    # Lunile cu ticuri pe disc (tester_cache/): un test „Real ticks” pe alte luni le descarcă întâi din QuestDB.
+    def tick_months(symbol: str) -> list[str]:
+        d = backtester.CACHE / backtester.SOURCE / symbol
+        return sorted(f.name[6:13] for f in d.glob("ticks_*.npz") if not f.name.endswith(".part.npz")) if d.exists() else []
+    # Ultimul test și ultima optimizare terminate: pagina le arată din nou după o reîncărcare.
+    last = lambda kind: next((j["id"] for j in reversed(TESTS.values()) if j["kind"] == kind and j["status"] == "done"), None)
     return {"symbols": [s for s in backtester.SYMBOLS if s in cov], "coverage": cov,
             "tfs": list(backtester.TFS), "modes": backtester.MODES, "currencies": backtester.CURRENCIES,
-            "running": next((j["id"] for j in TESTS.values() if j["status"] == "running"), None)}
+            "running": running["id"] if running else None, "running_kind": running["kind"] if running else None,
+            "last_run": last("run"), "last_opt": last("optimize"),
+            "tick_months": {sym: tick_months(sym) for sym in backtester.SYMBOLS}}
+
+
+# Pornește dinainte procesele de lucru ale optimizării (pagina o cere când alegi o optimizare în Setări),
+# ca prima optimizare să nu aștepte după ele (~10–30 s).
+@app.post("/api/tester/warm")
+async def tester_warm():
+    global tester_pool
+    if tester_pool is None:
+        tester_pool = ProcessPoolExecutor(max_workers=1)
+    if not any(j["status"] == "running" for j in TESTS.values()):
+        import optimizer
+        tester_pool.submit(optimizer.warm_pool)
+    return {"ok": True}
 
 
 @app.post("/api/tester/run")
@@ -1513,7 +1543,7 @@ async def tester_run(body: TestIn):
     global tester_pool, tester_mgr
     if any(j["status"] == "running" for j in TESTS.values()):
         raise HTTPException(409, "Un test rulează deja")
-    if body.kind not in ("run", "verify"):
+    if body.kind not in ("run", "verify", "optimize"):
         raise HTTPException(400, "Tip necunoscut")
     if tester_mgr is None:
         import multiprocessing
@@ -1524,16 +1554,18 @@ async def tester_run(body: TestIn):
     job = {"id": uuid.uuid4().hex[:12], "kind": body.kind, "status": "running", "error": "", "result": None,
            "started": time.time(), "shared": shared}
     TESTS[job["id"]] = job
-    # Păstrăm doar ultimele 5 teste (rezultatele pot fi mari).
+    # Păstrăm doar ultimele 5 teste (rezultatele pot fi mari), dar mereu ultima optimizare terminată:
+    # testele complete pornite din tabelul ei nu o împing afară.
+    keep = next((i for i in reversed(list(TESTS)) if TESTS[i]["kind"] == "optimize" and TESTS[i]["status"] == "done"), None)
     for old in list(TESTS)[:-5]:
-        if TESTS[old]["status"] != "running":
+        if TESTS[old]["status"] != "running" and old != keep:
             TESTS.pop(old)
 
     async def runner():
         global tester_pool
         try:
             job["result"] = await asyncio.get_running_loop().run_in_executor(
-                tester_pool, backtester.job, body.kind, body.settings, body.inputs, body.samples, shared)
+                tester_pool, backtester.job, body.kind, body.settings, body.inputs, body.samples, shared, body.opt)
             job["status"] = "done"
         except BrokenProcessPool:
             tester_pool = None
@@ -1554,6 +1586,7 @@ def tester_status_of(job: dict, with_result: bool = False) -> dict:
         live = {"phase": "", "progress": 0, "log": []}
     out = {"id": job["id"], "kind": job["kind"], "status": job["status"], "error": job["error"],
            "phase": live.get("phase"), "progress": live.get("progress"), "log": live.get("log", []),
+           "live": live.get("live"),
            "elapsed": round(time.time() - job["started"], 1)}
     if with_result and job["status"] == "done":
         out["result"] = job["result"]

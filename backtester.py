@@ -12,7 +12,8 @@ MetaTrader 5 și ca EA-ul mt5/MQL5/Experts/Nexus/Nexus_MATrend_EA.mq5. Rulează 
 #     timeframe-ului testat. Lunile doar de încălzire (dinaintea startului) nu au nevoie de ticuri:
 #     lumânările lor M1 le calculează direct QuestDB (SAMPLE BY 1m), aceleași valori, mult mai repede.
 #  2. Semnalele strategiei: strategy_fast.signals (aceeași logică ca strategy.py, calculată
-#     incremental). SL / TP vin din strategy.transaction_limits, funcția ORIGINALĂ.
+#     incremental). SL / TP: aceleași calcule ca strategy.transaction_limits (simcore.limits).
+#     Bucla de lumânări (pașii 3 și 4 de mai jos) e compilată cu numba: simcore.run_bars.
 #  3. Prețurile din interiorul lumânării, după „Modelling” (ca în MT5):
 #     - real  = „Every tick based on real ticks”: toate ticurile reale; SL / TP se execută la
 #               prețul ticului care le atinge (bid pentru buy, ask pentru sell);
@@ -31,6 +32,7 @@ MetaTrader 5 și ca EA-ul mt5/MQL5/Experts/Nexus/Nexus_MATrend_EA.mq5. Rulează 
 import calendar
 import math
 import sys
+from collections import OrderedDict
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
+import simcore
 import strategy_fast
 import tester_report
 
@@ -60,6 +63,10 @@ NY_ALIGNED = {14400: 3600}
 MODES = {"real": "Every tick based on real ticks", "ohlc1": "1 minute OHLC", "open": "Open prices only"}
 CURRENCIES = ("USD", "EUR")
 DAY = 86400
+# Lunile M1 terminate (m1_….npz), păstrate în memorie în procesul testerului: testele următoare pe aceeași perioadă
+# (ex. din tabelul de optimizare) nu le mai citesc / decomprimă de pe disc. ~2 MB pe lună.
+M1_MEMO: OrderedDict = OrderedDict()
+M1_MEMO_MONTHS = 120
 
 
 class Cancelled(Exception):
@@ -73,11 +80,10 @@ class Cancelled(Exception):
 def load_strategy():
     import importlib
     import indicators
-    if "analysis" not in sys.modules or not hasattr(sys.modules["analysis"], "trace"):
-        mod = types.ModuleType("analysis")
-        mod.__file__ = str(indicators.ANALYSIS)
-        exec(compile(indicators.analysis_part2(), str(indicators.ANALYSIS), "exec"), mod.__dict__)
-        sys.modules["analysis"] = mod
+    mod = types.ModuleType("analysis")           # din nou la fiecare test: modificările se văd imediat
+    mod.__file__ = str(indicators.ANALYSIS)
+    exec(compile(indicators.analysis_part2(), str(indicators.ANALYSIS), "exec"), mod.__dict__)
+    sys.modules["analysis"] = mod
     import strategy
     return importlib.reload(strategy)
 
@@ -114,6 +120,7 @@ class Data:
         self.dir = CACHE / SOURCE / symbol
         self.dir.mkdir(parents=True, exist_ok=True)
         self._ticks: dict[tuple[int, int], tuple] = {}
+        self._ticks_hi: dict[tuple[int, int], float] = {}     # până unde sunt ticurile din memorie (luna neterminată)
         self.done_hi = 0
         self.cov = self.coverage()
 
@@ -159,13 +166,17 @@ class Data:
     # Ticurile unei luni (timp ms, bid, ask): de pe disc sau din QuestDB, zi cu zi (4 zile în paralel).
     # Luna neterminată se păstrează pe disc până la ultima zi completă (ticks_….part.npz, cu „upto”),
     # ca la rularea următoare să se descarce doar zilele noi.
-    def month_ticks(self, y: int, m: int, report=None) -> tuple:
+    def month_ticks(self, y: int, m: int, report=None, need_hi: int | None = None) -> tuple:
+        """need_hi (ms): ajung ticurile până acolo; dacă ticks_….part.npz le are deja, nu mai descărcăm zilele noi."""
         key = (y, m)
-        if key in self._ticks:
+        if key in self._ticks and (need_hi is None or self._ticks_hi.get(key, math.inf) >= need_hi):
             return self._ticks[key]
         path = self.dir / f"ticks_{y:04d}-{m:02d}.npz"
         part = self.dir / f"ticks_{y:04d}-{m:02d}.part.npz"
-        if path.exists():
+        raw = self.month_raw(y, m) if path.exists() else None
+        if raw is not None:
+            out = simcore.decode_raw(*(np.asarray(x) for x in raw), month_range(y, m)[0], self.scale)
+        elif path.exists():
             z = np.load(path)
             out = (z["t"], z["bid"], z["ask"])
         else:
@@ -177,6 +188,8 @@ class Data:
                 z = np.load(part)
                 start = max(lo, min(int(z["upto"]), hi))
                 parts.append((z["t"], z["bid"], z["ask"]))
+            if need_hi is not None and need_hi <= start:
+                hi = start                        # zilele cerute sunt deja pe disc
             days = list(range(start, hi, DAY * 1000))
             with ThreadPoolExecutor(4) as ex:
                 futs = [ex.submit(self._fetch_ticks, d, min(d + DAY * 1000, hi)) for d in days]
@@ -188,6 +201,7 @@ class Data:
             out = (out[0].astype(np.int64), out[1].astype(np.float64), out[2].astype(np.float64))
             if self._cacheable(y, m):
                 np.savez_compressed(path, t=out[0], bid=out[1], ask=out[2])
+                self._save_raw(y, m, *out)
                 part.unlink(missing_ok=True)
             else:
                 upto = max(lo, min(hi, self.done_hi) // (DAY * 1000) * DAY * 1000)
@@ -195,19 +209,71 @@ class Data:
                     n = int(np.searchsorted(out[0], upto))
                     np.savez_compressed(part, t=out[0][:n], bid=out[1][:n], ask=out[2][:n], upto=upto)
         if len(self._ticks) >= 2:                     # în memorie: cel mult 2 luni de ticuri
+            self._ticks_hi.pop(next(iter(self._ticks)), None)
             self._ticks.pop(next(iter(self._ticks)))
         self._ticks[key] = out
+        self._ticks_hi[key] = math.inf if path.exists() else hi
         return out
+
+    # ---------- Ticurile necomprimate (raw/) ----------
+    # Pentru lunile terminate, lângă ticks_….npz: raw/AAAA-LL.{t,b,s}.npy = ms de la începutul lunii (uint32), bid în
+    # puncte (int32) și spread în puncte (int16), 10 octeți pe tic. Fără decomprimare se citesc de ~20 de ori mai repede,
+    # iar optimizarea pe Real ticks le mapează direct în memorie. Se fac o singură dată, din .npz (sau la descărcare).
+    # Prețurile sunt exact multipli de punct, deci bid = puncte / 10^digits dă exact aceleași numere ca în .npz.
+    @property
+    def scale(self) -> int:
+        return 10 ** SYMBOLS[self.symbol]["digits"]
+
+    def raw_paths(self, y: int, m: int) -> list:
+        return [self.dir / "raw" / f"{y:04d}-{m:02d}.{k}.npy" for k in ("t", "b", "s")]
+
+    def month_raw(self, y: int, m: int):
+        """(ms de la începutul lunii, bid în puncte, spread în puncte) mapate din raw/, sau None (lună neterminată /
+        prețuri care nu sunt multipli exacți de punct)."""
+        paths = self.raw_paths(y, m)
+        if not all(p.exists() for p in paths):
+            src = self.dir / f"ticks_{y:04d}-{m:02d}.npz"
+            if not src.exists():
+                return None
+            z = np.load(src)
+            if not self._save_raw(y, m, z["t"], z["bid"], z["ask"]):
+                return None
+        return tuple(np.load(p, mmap_mode="r") for p in paths)
+
+    def _save_raw(self, y: int, m: int, t, bid, ask) -> bool:
+        scale = self.scale
+        bp, ap = np.rint(bid * scale), np.rint(ask * scale)
+        off, sp = t - month_range(y, m)[0], ap - bp
+        if len(t) and not (np.array_equal(bp / scale, bid) and np.array_equal(ap / scale, ask) and off.min() >= 0
+                           and off.max() < 2 ** 32 and np.abs(sp).max() < 2 ** 15):
+            return False
+        (self.dir / "raw").mkdir(exist_ok=True)
+        for p, arr in zip(self.raw_paths(y, m), (off.astype(np.uint32), bp.astype(np.int32), sp.astype(np.int16))):
+            tmp = p.with_name(p.name.replace(".npy", ".tmp.npy"))
+            np.save(tmp, arr)
+            tmp.replace(p)
+        return True
 
     # Lumânările M1 dintr-o lună, făcute din ticuri: timp (s), o, h, l, c (bid), ticuri, spread minim (puncte).
     # Cu ticks=False (lunile doar de încălzire, fără simulare) le calculează QuestDB, fără ticuri.
-    def month_m1(self, y: int, m: int, report=None, ticks: bool = True) -> dict:
+    def month_m1(self, y: int, m: int, report=None, ticks: bool = True, need_hi: int | None = None) -> dict:
         path = self.dir / f"m1_{y:04d}-{m:02d}.npz"
         if path.exists():
-            z = np.load(path)
-            return {k: z[k] for k in z.files}
+            key = (str(path), path.stat().st_mtime_ns)
+            out = M1_MEMO.get(key)
+            if out is None:
+                z = np.load(path)
+                out = {k: z[k] for k in z.files}
+                for a in out.values():
+                    a.flags.writeable = False             # comune între teste: nu se modifică
+                M1_MEMO[key] = out
+                while len(M1_MEMO) > M1_MEMO_MONTHS:
+                    M1_MEMO.popitem(last=False)
+            else:
+                M1_MEMO.move_to_end(key)
+            return out
         if ticks or (y, m) in self._ticks or (self.dir / f"ticks_{y:04d}-{m:02d}.npz").exists():
-            t, bid, ask = self.month_ticks(y, m, report)
+            t, bid, ask = self.month_ticks(y, m, report, need_hi)
             out = m1_from_ticks(t, bid, ask, self.point)
         else:
             lo, hi = month_range(y, m)
@@ -230,7 +296,7 @@ class Data:
                 what = "ticurile" if ticks else "lumânările M1 (încălzire)"
                 self.log(f"Descarc {what} {self.symbol} {y:04d}-{m:02d} din QuestDB{label}...")
             rep = (lambda f, i=i: self.progress("data", (i + f) / len(ms))) if self.progress else None
-            parts.append(self.month_m1(y, m, rep, ticks))
+            parts.append(self.month_m1(y, m, rep, ticks, hi_ms))
             if self.progress:
                 self.progress("data", (i + 1) / len(ms))
         keys = ("t", "o", "h", "l", "c", "v", "spr")
@@ -242,7 +308,7 @@ class Data:
     def ticks(self, lo_ms: int, hi_ms: int) -> tuple:
         out = []
         for y, m in months(lo_ms, hi_ms):
-            t, b, a = self.month_ticks(y, m)
+            t, b, a = self.month_ticks(y, m, need_hi=hi_ms)
             i, j = np.searchsorted(t, lo_ms), np.searchsorted(t, hi_ms)
             out.append((t[i:j], b[i:j], a[i:j]))
         if len(out) == 1:
@@ -363,6 +429,41 @@ class Account:
         return lots
 
 
+# ---------- Rezultatele simulării (simcore) în formatul raportului ----------
+# Rândurile de tranzacții din simcore -> lista de deal-uri (intrare + ieșire) și lista de tranzacții.
+def deals_and_trades(rows: np.ndarray, digits: int) -> tuple[list[dict], list[dict]]:
+    names = {1: "buy", -1: "sell"}
+    deals, trades = [], []
+    for r in rows:
+        d = int(r[simcore.T_DIR])
+        reason = int(r[simcore.T_REASON])
+        if reason in (simcore.R_SL, simcore.R_TP):
+            comment = f"{'sl' if reason == simcore.R_SL else 'tp'} {r[simcore.T_VALUE]:.{digits}f}"
+        else:
+            comment = {simcore.R_SO: f"so {r[simcore.T_VALUE]:.1f}%", simcore.R_MA: "ma",
+                       simcore.R_END: "end of test"}[reason]
+        t_in, t_out = int(r[simcore.T_OPEN_T]), int(r[simcore.T_CLOSE_T])
+        lots, profit = float(r[simcore.T_LOTS]), float(r[simcore.T_PROFIT])
+        before, after = float(r[simcore.T_BAL_BEFORE]), float(r[simcore.T_BAL_AFTER])
+        deals.append({"time": t_in, "deal": len(deals) + 2, "type": names[d], "entry": "in", "volume": lots,
+                      "price": float(r[simcore.T_OPEN]), "profit": 0.0, "balance": round(before, 2), "comment": ""})
+        deals.append({"time": t_out, "deal": len(deals) + 2, "type": names[-d], "entry": "out", "volume": lots,
+                      "price": float(r[simcore.T_CLOSE]), "profit": round(profit, 2), "balance": round(after, 2),
+                      "comment": comment})
+        trades.append({"dir": d, "open_time": t_in, "close_time": t_out, "lots": lots, "open": float(r[simcore.T_OPEN]),
+                       "close": float(r[simcore.T_CLOSE]), "sl": float(r[simcore.T_SL]), "tp": float(r[simcore.T_TP]),
+                       "profit": profit, "balance_before": before, "balance_after": after,
+                       "mfe": float(r[simcore.T_MFE]), "mae": float(r[simcore.T_MAE]), "comment": comment})
+    return deals, trades
+
+
+# Drawdown-ul (balanță sau equity) din starea simcore, ca obiect tester_report.Drawdown.
+def drawdown(initial: float, S: np.ndarray, o: int) -> tester_report.Drawdown:
+    dd = tester_report.Drawdown(initial)
+    dd.peak, dd.min, dd.max_dd, dd.max_dd_pct, dd.rel_pct, dd.rel_money = (float(x) for x in S[o:o + 6])
+    return dd
+
+
 # ---------- Rularea ----------
 # Perioada testată și lumânările ei, cu încălzirea pentru fereastra strategiei (InpTLBars) înainte de
 # start, ca indicatorul din MT5. Întoarce (start, end, lo, m1, bars, first); first = prima lumânare testată.
@@ -433,7 +534,6 @@ def run(settings: dict, inputs: dict, progress=None, log=print, cancelled=lambda
     if period < 1 or window < 1:
         raise ValueError("Perioada MA și numărul de lumânări trebuie să fie cel puțin 1")
 
-    strategy = load_strategy()
     db = TickDB(SOURCE, log=lambda *_: None)
     data = Data(db, symbol, say, prog)
     start, end, lo, m1, bars, first = load_period(data, settings, window, say)
@@ -452,168 +552,83 @@ def run(settings: dict, inputs: dict, progress=None, log=print, cancelled=lambda
 
     up_m1 = bar_up(m1["o"], m1["c"])
     up_bar = bar_up(bars["o"], bars["c"])
+    m1_points = np.where(m1["v"] == 1, 1, np.where(m1["v"] == 2, 2, 4))      # prețuri pe minut (ohlc1)
 
-    # Prețurile lumânării k: (timp ms, bid, ask); prima = primul tic al lumânării.
-    def points(k: int, only_first: bool = False):
-        t0 = int(bars["t"][k]) * 1000
-        t1 = min(t0 + tf * 1000, end)
-        if mode == "real":
-            t, b, a = data.ticks(t0, t1)
-            return (t[:1], b[:1], a[:1]) if only_first else (t, b, a)
+    # Prețurile lumânărilor k0 ... k1-1: (timp ms, bid, ask, curs USD) și unde începe / se termină
+    # fiecare lumânare în ele (js / je). Prima = primul tic al lumânării.
+    def chunk_points(k0: int, k1: int):
         if mode == "open":
-            if only_first:
-                return (np.array([t0]), bars["o"][k:k + 1], bars["o"][k:k + 1] + bars["spr"][k:k + 1] * point)
-            return ohlc_points(bars["t"][k:k + 1], bars["o"][k:k + 1], bars["h"][k:k + 1], bars["l"][k:k + 1],
-                               bars["c"][k:k + 1], bars["v"][k:k + 1], bars["spr"][k:k + 1], up_bar[k:k + 1],
-                               tf, point, False)
-        i0, i1 = int(bars["i0"][k]), int(bars["i1"][k])
-        if only_first:
-            i1 = i0 + 1
-        sl_ = slice(i0, i1)
-        t, b, a = ohlc_points(m1["t"][sl_], m1["o"][sl_], m1["h"][sl_], m1["l"][sl_], m1["c"][sl_], m1["v"][sl_],
-                              m1["spr"][sl_], up_m1[sl_], 60, point, True)
-        if only_first:
-            return t[:1], b[:1], a[:1]
-        return t, b, a
-
-    # ---------- Starea simulării ----------
-    deals: list[dict] = []
-    trades: list[dict] = []
-    pos: dict | None = None
-    eq_stats = tester_report.Drawdown(acct.initial)
-    bal_stats = tester_report.Drawdown(acct.initial)
-    min_margin_level = None
-    graph: list[list] = []          # [timp s, balanță, equity minim, equity, încărcare %]
-    skipped = {"wrong_side": 0, "no_lots": 0}
-
-    def deal(t_ms, kind, direction, lots, px, profit, comment):
-        deals.append({"time": int(t_ms), "deal": len(deals) + 2, "type": kind, "entry": direction,
-                      "volume": lots, "price": px, "profit": round(profit, 2), "balance": round(acct.balance, 2),
-                      "comment": comment})
-
-    def close(t_ms, px, bid_now, comment):
-        nonlocal pos
-        sign = 1 if pos["dir"] > 0 else -1
-        per_price = pos["lots"] * spec["contract"] * acct.usd_rate(t_ms, bid_now)   # bani pe o unitate de preț
-        profit = round(float((px - pos["price"]) * sign * per_price), 2)
-        acct.balance = round(acct.balance + profit, 2)
-        bal_stats.update(np.array([acct.balance]))
-        deal(t_ms, "sell" if pos["dir"] > 0 else "buy", "out", pos["lots"], px, profit, comment)
-        trades.append({"dir": pos["dir"], "open_time": pos["time"], "close_time": int(t_ms), "lots": pos["lots"],
-                       "open": pos["price"], "close": px, "sl": pos["sl"], "tp": pos["tp"], "profit": profit,
-                       "balance_before": pos["balance_before"], "balance_after": acct.balance,
-                       "mfe": round(float(max(pos["mfe"], (px - pos["price"]) * sign) * per_price), 2),
-                       "mae": round(float(min(pos["mae"], (px - pos["price"]) * sign) * per_price), 2),
-                       "comment": comment})
-        pos = None
-
-    # SL / TP / stop out pe prețurile t, b, a (poziția deschisă); actualizează equity și drawdown-ul.
-    def walk(t, b, a):
-        nonlocal min_margin_level
-        if pos is None or not len(t):
-            return None
-        sign = pos["dir"]
-        px = b if sign > 0 else a                       # prețul la care s-ar închide poziția
-        rate = acct.usd_rate(t, b)
-        floating = (px - pos["price"]) * sign * pos["lots"] * spec["contract"] * rate
-        eq = acct.balance + floating
-        margin = np.broadcast_to(acct.margin(pos["lots"], pos["price"], t, b), eq.shape)
-        level = eq / margin * 100
-        if sign > 0:
-            hit_sl, hit_tp = b <= pos["sl"], b >= pos["tp"]
+            s_ = slice(k0, k1)
+            t, b, a = ohlc_points(bars["t"][s_], bars["o"][s_], bars["h"][s_], bars["l"][s_], bars["c"][s_],
+                                  bars["v"][s_], bars["spr"][s_], up_bar[s_], tf, point, False)
+            js = np.arange(k1 - k0) * 4
+            je = js + 4
+        elif mode == "ohlc1":
+            i0, i1 = int(bars["i0"][k0]), int(bars["i1"][k1 - 1])
+            s_ = slice(i0, i1)
+            t, b, a = ohlc_points(m1["t"][s_], m1["o"][s_], m1["h"][s_], m1["l"][s_], m1["c"][s_], m1["v"][s_],
+                                  m1["spr"][s_], up_m1[s_], 60, point, True)
+            cum = np.r_[0, np.cumsum(m1_points[s_])]
+            js, je = cum[bars["i0"][k0:k1] - i0], cum[bars["i1"][k0:k1] - i0]
         else:
-            hit_sl, hit_tp = a >= pos["sl"], a <= pos["tp"]
-        so = level <= STOP_OUT
-        any_hit = hit_sl | hit_tp | so
-        stop = int(np.argmax(any_hit)) if any_hit.any() else len(t)
-        upto = slice(0, stop + 1 if stop < len(t) else len(t))
-        eq_seen = eq[upto]
-        eq_stats.update(eq_seen)
-        lv = float(level[upto].min())
-        min_margin_level = lv if min_margin_level is None else min(min_margin_level, lv)
-        fav = (px[upto] - pos["price"]) * sign
-        pos["mfe"] = max(pos["mfe"], float(fav.max()))
-        pos["mae"] = min(pos["mae"], float(fav.min()))
-        pos["load"] = max(pos.get("load", 0.0), float((margin[upto] / np.maximum(eq_seen, 1e-9) * 100).max()))
-        if stop >= len(t):
-            return float(eq[-1]), float(eq_seen.min())
-        i = stop
-        if so[i] and not (hit_sl[i] or hit_tp[i]):
-            close(t[i], float(px[i]), float(b[i]), f"so {lv:.1f}%")
-        else:
-            which = "sl" if hit_sl[i] else "tp"
-            level_px = pos[which]
-            fill = float(px[i]) if mode == "real" else level_px
-            close(t[i], fill, float(b[i]), f"{which} {level_px:.{spec['digits']}f}")
-        return acct.balance, float(eq_seen.min())
+            t0s = bars["t"][k0:k1].astype(np.int64) * 1000
+            t1s = np.minimum(t0s + tf * 1000, end)
+            t, b, a = data.ticks(int(t0s[0]), int(t1s.max()))
+            js, je = np.searchsorted(t, t0s), np.searchsorted(t, t1s)
+        rate = np.ascontiguousarray(np.broadcast_to(acct.usd_rate(t, b), np.shape(b)), dtype=np.float64)
+        return (np.asarray(t, np.int64), np.asarray(b, np.float64), np.asarray(a, np.float64), rate,
+                np.asarray(js, np.int64), np.asarray(je, np.int64))
 
-    names = {1: "buy", -1: "sell"}
-    last_point = None
+    # ---------- Simularea (simcore, compilat), lună cu lună ----------
+    # Bucățile de lumânări: câte o lună (după începutul lumânării), ca ticurile modului „real” să nu
+    # stea toate în memorie și ca progresul să se vadă.
+    month = (bars["t"][first:] // DAY).astype("datetime64[D]").astype("datetime64[M]").astype(np.int64)
+    cuts = [first + int(i) for i in np.r_[0, np.nonzero(np.diff(month))[0] + 1]] + [n]
+    S = simcore.new_state(acct.initial)
+    p_col = np.ascontiguousarray(strategy_fast.price_column(bars["o"], bars["h"], bars["l"], bars["c"], price),
+                                 dtype=np.float64)
+    c_col = np.ascontiguousarray(bars["c"], dtype=np.float64)
+    bar_t = np.asarray(bars["t"], np.int64)
+    rows, graphs = [], []
     total = n - first
-    report_every = max(1, total // 200)
-    for idx, k in enumerate(range(first, n)):
-        if idx % report_every == 0:
-            prog("run", idx / total)
-        need_all = pos is not None
-        t, b, a = points(k, only_first=not need_all)
-        if not len(t):
-            continue
-        eq_min = None
-        # 1. Primul tic: SL / TP / stop out pentru poziția existentă.
-        if pos is not None:
-            r = walk(t[:1], b[:1], a[:1])
-            eq_min = r[1] if r else None
-        t0, b0, a0 = int(t[0]), float(b[0]), float(a[0])
-        # 2. Închiderea pe MA (lumânarea precedentă închisă de partea cealaltă a MA).
-        if pos is not None and close_on_ma:
-            if (pos["dir"] > 0 and sig["exit_buy"][k]) or (pos["dir"] < 0 and sig["exit_sell"][k]):
-                close(t0, b0 if pos["dir"] > 0 else a0, b0, "ma")
-        # 3. Intrarea, doar fără poziție.
-        if pos is None and sig["entry"][k] != 0:
-            d = int(sig["entry"][k])
-            df = strategy_fast.frame(bars["o"], bars["h"], bars["l"], bars["c"], max(0, k - window), k)
-            lim = strategy.transaction_limits(df, period, price, names[d], rr)
-            entry = a0 if d > 0 else b0
-            if lim is None:
-                skipped["wrong_side"] += 1
-            else:
-                tp, sl, _op = (float(x) for x in lim)
-                ok = (entry - sl >= point and tp > entry) if d > 0 else (sl - entry >= point and tp < entry)
-                lots = acct.lots_for(entry, sl, risk_pct, t0, b0) if ok else 0.0
-                if not ok:
-                    skipped["wrong_side"] += 1
-                elif lots <= 0:
-                    skipped["no_lots"] += 1
-                else:
-                    sl = round(sl, spec["digits"])
-                    tp = round(tp, spec["digits"])
-                    pos = {"dir": d, "lots": lots, "price": entry, "sl": sl, "tp": tp, "time": t0,
-                           "balance_before": acct.balance, "mfe": 0.0, "mae": 0.0}
-                    deal(t0, names[d], "in", lots, entry, 0.0, "")
-        # 4. Restul prețurilor lumânării, cât timp există o poziție.
-        if pos is not None:
-            if not need_all:
-                t, b, a = points(k)
-            r = walk(t[1:], b[1:], a[1:])
-            if r:
-                eq_min = r[1] if eq_min is None else min(eq_min, r[1])
-        last_point = (int(t[-1]), float(b[-1]), float(a[-1]))
-        # Graficul: balanța, equity-ul minim din lumânare, equity-ul la sfârșitul ei, încărcarea depozitului.
-        if pos is not None:
-            px = last_point[1] if pos["dir"] > 0 else last_point[2]
-            eq_end = acct.balance + (px - pos["price"]) * pos["dir"] * pos["lots"] * spec["contract"] * \
-                acct.usd_rate(last_point[0], last_point[1])
-            load = pos.get("load", 0.0)
-        else:
-            eq_end, load = acct.balance, 0.0
-        graph.append([int(bars["t"][k]), acct.balance, round(min(eq_min, eq_end) if eq_min is not None else eq_end, 2),
-                      round(float(eq_end), 2), round(load, 2)])
-        if pos is not None:
-            pos["load"] = 0.0
-    if pos is not None and last_point:
-        tl, bl, al = last_point
-        close(tl, bl if pos["dir"] > 0 else al, bl, "end of test")
-        graph.append([int(tl // 1000), acct.balance, acct.balance, acct.balance, 0.0])
+    if mode in ("real", "ohlc1") and acct.currency == "USD":
+        # Pe indexul pe minute (ca optimizarea): aceleași tranzacții și același raport, fără să parcurgem tic cu tic
+        # minutele în care poziția nu se poate închide. Indexul se refolosește (ex. testele din tabelul de optimizare).
+        import fastsim
+        prog("run", 0.0)
+        folder, bi, bt, bf, _gf, _gl = fastsim.tick_index(data, settings, bars, first, end, m1, say)
+        ki, kf, segs, _keep = fastsim.index_arrays(folder)
+        cb = np.r_[0, np.cumsum(sig["exit_buy"][:n])].astype(np.int64)
+        cs = np.r_[0, np.cumsum(sig["exit_sell"][:n])].astype(np.int64)
+        tr, gr = simcore.run_blocks_full(
+            S, first, n, bi, bt, bf, ki, kf, segs, 10 ** spec["digits"], point, mode == "real",
+            bar_t, sig["entry"], cb, cs, close_on_ma, np.full(n + 1, np.nan), p_col, period, window, c_col, rr,
+            10.0 ** spec["digits"], float(spec["contract"]), spec["vol_min"], spec["vol_step"], spec["vol_max"],
+            float(acct.leverage), risk_pct, STOP_OUT, mode == "real")
+        rows.append(tr)
+        graphs.append(gr)
+    else:
+        for k0, k1 in zip(cuts[:-1], cuts[1:]):
+            prog("run", (k0 - first) / total)
+            t, b, a, rate, js, je = chunk_points(k0, k1)
+            tr, gr = simcore.run_bars(
+                S, k0, k1, js, je, bar_t, t, b, a, rate, sig["entry"], sig["exit_buy"], sig["exit_sell"], close_on_ma,
+                p_col, c_col, period, window, rr, point, 10.0 ** spec["digits"], float(spec["contract"]),
+                spec["vol_min"], spec["vol_step"], spec["vol_max"], float(acct.leverage), risk_pct, STOP_OUT,
+                mode == "real", True)
+            rows.append(tr)
+            graphs.append(gr)
+    end_row = simcore.finish(S, float(spec["contract"]))
+    rows.append(end_row)
+    deals, trades = deals_and_trades(np.concatenate(rows), spec["digits"])
+    acct.balance = float(S[simcore.BAL])
+    graph = [[int(g[0]), float(g[1]), float(g[2]), float(g[3]), float(g[4])] for g in np.concatenate(graphs)]
+    if len(end_row):
+        graph.append([int(S[simcore.LAST_T]) // 1000, acct.balance, acct.balance, acct.balance, 0.0])
+    eq_stats = drawdown(acct.initial, S, simcore.EQ_DD)
+    bal_stats = drawdown(acct.initial, S, simcore.BAL_DD)
+    min_margin_level = float(S[simcore.MIN_LEVEL]) if np.isfinite(S[simcore.MIN_LEVEL]) else None
+    skipped = {"wrong_side": int(S[simcore.SKIP_SIDE]), "no_lots": int(S[simcore.SKIP_LOTS])}
     if mode == "real":
         # Ticurile reale din perioadă (MT5 le numără pe toate, nu doar pe cele cu poziție deschisă).
         ticks_total = int(m1["v"][int(bars["i0"][first]):].sum())
@@ -651,9 +666,42 @@ def data_quality(db, symbol: str, start: int, end: int) -> float:
     return round(min(100.0, done / days * 100), 2)
 
 
+# Încarcă funcțiile compilate (numba, din cache-ul de pe disc: ~1,5 s) în procesul testerului, înainte de
+# primul test: server.py o pornește când se deschide pagina /tester.
+def warmup() -> None:
+    n = 40
+    rng = np.random.default_rng(0)
+    c = 1 + np.cumsum(rng.normal(0, 1e-3, n))
+    o, h, l = np.r_[c[0], c[:-1]], c + 5e-4, c - 5e-4
+    sig = strategy_fast.signals(o, h, l, c, 5, "close", 20)
+    t, b, a = ohlc_points(np.arange(n, dtype=np.int64) * 3600, o, h, l, c, np.full(n, 4), np.zeros(n, np.int64),
+                          bar_up(o, c), 3600, 1e-5, False)
+    js = np.arange(n, dtype=np.int64) * 4
+    S = simcore.new_state(1000.0)
+    simcore.run_bars(S, 20, n, js[20:], js[20:] + 4, np.arange(n, dtype=np.int64), t.astype(np.int64), b, a,
+                     np.ones(len(b)), sig["entry"], sig["exit_buy"], sig["exit_sell"], True, c, c, 5, 20, 2.0, 1e-5,
+                     1e5, 1e5, 0.01, 0.01, 500.0, 100.0, 1.0, STOP_OUT, False, True)
+    simcore.finish(S, 1e5)
+    # Real ticks / 1 minute OHLC (indexul pe minute): build_index și run_blocks_full, cu aceleași tipuri ca în run.
+    off = np.arange(0, n * 3600_000, 900_000, dtype=np.uint32)
+    bp = np.rint(np.repeat(c, 4) * 1e5).astype(np.int32)
+    sp = np.full(len(off), 3, np.int16)
+    segs = np.array([[off.ctypes.data, bp.ctypes.data, sp.ctypes.data, len(off), 0]], np.int64)
+    t0s = np.arange(20, n, dtype=np.int64) * 3600_000
+    cb = np.r_[0, np.cumsum(sig["exit_buy"][:n])].astype(np.int64)
+    cs = np.r_[0, np.cumsum(sig["exit_sell"][:n])].astype(np.int64)
+    for exact in (True, False):
+        bi, bt, bf, ki, kf, _gf, _gl = simcore.build_index(segs, t0s, t0s + 3600_000, 10 ** 5, 1e-5, exact)
+        ki, kf = ki.copy(), kf.copy()
+        ki.flags.writeable = kf.flags.writeable = False       # ca tablourile mapate din fișiere
+        simcore.run_blocks_full(simcore.new_state(1000.0), 20, n, bi, bt, bf, ki, kf, segs, 10 ** 5, 1e-5, exact,
+                                np.arange(n, dtype=np.int64), sig["entry"], cb, cs, True, np.full(n + 1, np.nan), c, 5,
+                                20, c, 2.0, 1e5, 1e5, 0.01, 0.01, 500.0, 100.0, 1.0, STOP_OUT, exact)
+
+
 # ---------- Punctul de intrare în procesul separat (server.py) ----------
 # shared = dicționar comun cu serverul (multiprocessing.Manager): phase, progress, log, cancel.
-def job(kind: str, settings: dict, inputs: dict, samples: int, shared) -> dict:
+def job(kind: str, settings: dict, inputs: dict, samples: int, shared, opt: dict | None = None) -> dict:
     def progress(phase, f):
         shared["phase"], shared["progress"] = phase, round(float(f), 4)
 
@@ -665,6 +713,12 @@ def job(kind: str, settings: dict, inputs: dict, samples: int, shared) -> dict:
 
     if kind == "verify":
         return verify(settings, inputs, samples, progress, log, cancelled)
+    if kind == "optimize":
+        import optimizer
+
+        def live(d):
+            shared["live"] = d
+        return optimizer.optimize(settings, inputs, opt or {}, progress, log, cancelled, live)
     return run(settings, inputs, progress, log, cancelled)
 
 

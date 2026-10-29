@@ -577,7 +577,7 @@ function connect() {
       // Sărim direct la prezent (rightOffset lumânări libere în dreapta). Fără animație: scrollToRealTime
       // animează ~1 s, iar liniile indicatorilor sosite între timp ar opri derularea la jumătate.
       chart.timeScale().scrollToPosition(chart.timeScale().options().rightOffset, false);
-      document.title = `${msg.symbol} · Nexus Live Chart`;
+      document.title = `${msg.symbol} · Verax Live Chart`;
       // Chartul de ticuri pornește cu ultimele ticuri din istoric (sau doar cu ultimul tic).
       state.ticks = msg.recent.length ? msg.recent : (msg.last ? [msg.last] : []);
       // `...msg.last` desface lista [timp, bid, ask] în trei argumente separate.

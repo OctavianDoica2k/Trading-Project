@@ -1,14 +1,14 @@
 """
 Copia RAPIDĂ a strategiei din strategy.py (verify_entry / verify_exit), pentru Strategy Tester.
-strategy.py și analysis.py rămân neschimbate; aici aceeași logică e calculată incremental, o
-singură dată pentru toate lumânările, în loc să fie reluată de la zero pe fiecare lumânare.
+Aici aceeași logică e calculată incremental, o singură dată pentru toate lumânările, în loc să fie
+reluată de la zero pe fiecare lumânare (cum o cere strategy.py, apelat cu fereastra lumânării).
 """
 # =====================================================================================
 #  CE FACE ACEST FIȘIER (pe scurt)
 # -------------------------------------------------------------------------------------
-#  De ce: verify_entry rulează trace() de două ori pe fereastra de lumânări; trace verifică toate
-#  perechile de pivoturi pe toate închiderile. La 1000 de lumânări durează ~7 s pe lumânare, deci
-#  un backtest H1 pe un an ar dura ~12 ore.
+#  De ce: verify_entry verifică toate perechile de pivoturi din fereastră pe închiderile de după ele,
+#  la fiecare lumânare. Chiar vectorizat (~10 ms la 1000 de lumânări), un backtest H1 pe 5 ani ar
+#  dura minute; aici toate lumânările deodată durează zeci de milisecunde.
 #
 #  signals(...) calculează, pentru fiecare lumânare k, ce ar întoarce funcțiile originale dacă
 #  le-am apela la deschiderea lui k, cu fereastra df = ultimele `window` lumânări ÎNCHISE

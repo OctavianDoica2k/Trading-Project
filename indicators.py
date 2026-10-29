@@ -111,10 +111,15 @@ def run_trend_analysis(bars: list[dict], params: dict) -> dict:
     import pandas as pd  # doar aici, ca serverul să nu depindă de pandas
 
     df = pd.DataFrame(bars, columns=["time", "open", "high", "low", "close"])
-    code = trace_body(analysis_part2())
+    tree = analysis_part2()
+    code = trace_body(tree)
+    # Funcțiile și importurile din partea a 2-a (ex. pivoti, drepte_valide, np), pe care le folosește trace().
+    defs: dict = {}
+    exec(compile(tree, str(ANALYSIS), "exec"), defs)
 
     # Rulează codul lui trace() cu variabilele din ns (df, pd) și întoarce toate variabilele de la final.
     def run(ns):
+        ns = {**defs, **ns}
         exec(code, ns)
         return ns
     ns = run_on_frames(df, run)

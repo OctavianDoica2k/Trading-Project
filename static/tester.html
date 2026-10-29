@@ -2,13 +2,13 @@
 <!-- ================================================================================== -->
 <!-- Strategy Tester: backtest-ul strategiei din strategy.py, ca în MetaTrader 5.          -->
 <!-- Se deschide în fereastra de peste chart (testerwin.js, cu ?embed=1) sau ca pagină.    -->
-<!-- Tab-urile: Setări, Parametri, Grafic, Backtest, Tranzacții, Jurnal (tester.js).       -->
+<!-- Tab-urile: Setări, Parametri, Grafic, Backtest, Optimizare, Tranzacții, Jurnal.        -->
 <!-- ================================================================================== -->
 <html lang="ro">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nexus Strategy Tester</title>
+<title>Verax Strategy Tester</title>
 <link rel="stylesheet" href="/static/tester.css">
 </head>
 <body>
@@ -26,6 +26,7 @@
     <button class="tab" data-tab="inputs" role="tab"><svg viewBox="0 0 16 16"><path d="M3 3h10M3 8h10M3 13h6"/></svg>Parametri<span id="inputsBadge" class="badge" hidden></span></button>
     <button class="tab" data-tab="graph" role="tab"><svg viewBox="0 0 16 16"><path d="M2 13l4-5 3 3 5-7"/></svg>Grafic</button>
     <button class="tab" data-tab="report" role="tab"><svg viewBox="0 0 16 16"><path d="M3 14V8M8 14V3M13 14v-4"/></svg>Backtest</button>
+    <button class="tab" data-tab="opt" role="tab"><svg viewBox="0 0 16 16"><circle cx="4" cy="11" r="1.4"/><circle cx="8" cy="6" r="1.4"/><circle cx="12" cy="9" r="1.4"/><circle cx="11" cy="3.5" r="1.4"/></svg>Optimizare<span id="optBadge" class="badge" hidden></span></button>
     <button class="tab" data-tab="deals" role="tab"><svg viewBox="0 0 16 16"><path d="M2 5h10l-2-2M14 11H4l2 2"/></svg>Tranzacții<span id="dealsBadge" class="badge" hidden></span></button>
     <button class="tab" data-tab="journal" role="tab"><svg viewBox="0 0 16 16"><path d="M4 2h8v12H4zM6.5 5.5h3M6.5 8h3M6.5 10.5h2"/></svg>Jurnal</button>
   </nav>
@@ -97,6 +98,22 @@
         <h3>Modelling</h3>
         <div id="sMode" class="modes" role="radiogroup"></div>
       </section>
+
+      <!-- Optimizarea (ca în MT5: Disabled / Slow complete / Fast genetic); parametrii se aleg în tab-ul Parametri. -->
+      <section class="card wide" id="sOptCard">
+        <div class="cardhead"><h3>Optimizare</h3>
+          <button type="button" class="linkbtn" data-goto="inputs">Parametrii optimizați →</button></div>
+        <select id="sOpt" hidden aria-hidden="true">
+          <option value="off">Dezactivată</option><option value="complete">Completă</option><option value="genetic">Genetică</option></select>
+        <div id="sOptModes" class="modes" role="radiogroup" aria-label="Tipul optimizării"></div>
+        <div class="optsettings">
+          <div class="field"><label for="sCrit">Criteriu</label><select id="sCrit"><option value="balance">Balance max</option></select></div>
+          <div class="field"><label for="sSeed">Sămânța</label>
+            <input id="sSeed" type="number" min="1" step="1" placeholder="aleatoare la fiecare rulare"></div>
+        </div>
+        <div id="sOptStats" class="ostats"></div>
+        <div id="sOptNotes" class="onotes"></div>
+      </section>
     </div>
     <p class="foot">Orele sunt în UTC. Testul începe la 00:00 în data de start și se oprește la 00:00 în data de final, ca în MT5.
       Ticurile vin din QuestDB și se păstrează pe disc (<code>tester_cache/</code>): prima rulare pe o perioadă nouă descarcă
@@ -109,33 +126,38 @@
       <div class="cardhead"><h3>Parametrii strategiei</h3>
         <button type="button" id="iReset" class="btn ghost">Valorile implicite</button></div>
       <table class="inputs">
-        <thead><tr><th>Variabilă</th><th>Valoare</th><th class="def">Implicit</th></tr></thead>
+        <thead><tr><th>Variabilă</th><th>Valoare</th><th class="def">Implicit</th>
+          <th class="o">Optimizare</th><th class="o">Start</th><th class="o">Pas</th><th class="o">Stop</th><th class="o r">Valori</th></tr></thead>
         <tbody>
-          <tr class="grp"><td colspan="3">Medie mobilă</td></tr>
+          <tr class="grp"><td colspan="8">Medie mobilă</td></tr>
           <tr data-k="ma_period"><td>Perioada MA <code>InpMAPeriod</code></td><td><input id="iPeriod" type="number" min="1" step="1"></td><td class="def">50</td></tr>
-          <tr class="off"><td>Tipul MA <code>InpMAMethod</code></td><td><span class="static">Simple</span></td><td class="def">doar Simple</td></tr>
+          <tr class="off"><td>Tipul MA <code>InpMAMethod</code></td><td><span class="static">Simple</span></td><td class="def">doar Simple</td><td colspan="5" class="o"></td></tr>
           <tr data-k="ma_price"><td>Prețul pe care se calculează MA <code>InpMAPrice</code></td><td><select id="iPrice">
             <option value="close">Close price</option><option value="open">Open price</option>
             <option value="high">High price</option><option value="low">Low price</option>
             <option value="median">Median price</option><option value="typical">Typical price</option>
             <option value="weighted">Weighted price</option></select></td><td class="def">Close price</td></tr>
-          <tr class="grp"><td colspan="3">Linii de trend</td></tr>
+          <tr class="grp"><td colspan="8">Linii de trend</td></tr>
           <tr data-k="tl_bars"><td>Lumânări închise din urmă analizate <code>InpTLBars</code></td><td><input id="iBars" type="number" min="10" step="1"></td><td class="def">1000</td></tr>
-          <tr class="grp"><td colspan="3">Ieșiri</td></tr>
+          <tr class="grp"><td colspan="8">Ieșiri</td></tr>
           <tr data-k="rr"><td>Raport risc/câștig (TP = RR × distanța până la SL) <code>InpRR</code></td><td><input id="iRR" type="number" min="0.1" step="0.1"></td><td class="def">2.0</td></tr>
           <tr data-k="close_on_ma"><td>Închide poziția când prețul se închide de partea cealaltă a MA <code>InpCloseOnMA</code></td><td><select id="iCloseMA"><option value="true">true</option><option value="false">false</option></select></td><td class="def">true</td></tr>
-          <tr class="grp"><td colspan="3">Risc</td></tr>
+          <tr class="grp"><td colspan="8">Risc</td></tr>
           <tr data-k="risk_pct"><td>Risc pe tranzacție, % din balanță <code>InpRiskPct</code></td><td><input id="iRisk" type="number" min="0.01" step="0.1"></td><td class="def">1.0</td></tr>
           <tr data-k="magic"><td>Magic number <code>InpMagic</code></td><td><input id="iMagic" type="number" step="1"></td><td class="def">20261026</td></tr>
         </tbody>
       </table>
+      <div id="iCombos" class="combos o"></div>
       <p class="hint">Aceiași parametri ca EA-ul <code>Nexus_MATrend_EA.mq5</code>, fără tipul MA (aici doar Simple, ca
-        <code>medie_mobila</code>) și fără desenarea liniilor. Valorile modificate sunt marcate cu albastru.</p>
+        <code>medie_mobila</code>) și fără desenarea liniilor. Valorile schimbate față de EA sunt marcate cu albastru.
+        <span class="o">Parametrii bifați iau toate valorile de la Start la Stop, cu Pasul dat (valoarea lor din coloana
+        Valoare nu se folosește); ceilalți rămân la Valoare.</span></p>
     </section>
   </section>
 
   <!-- ===== Grafic ===== -->
   <section id="tab-graph" class="pane">
+    <div class="frombar" data-from hidden></div>
     <div class="kpis" data-kpis></div>
     <section class="card graphcard">
       <div class="cardhead">
@@ -154,6 +176,7 @@
 
   <!-- ===== Backtest (raportul) ===== -->
   <section id="tab-report" class="pane">
+    <div class="frombar" data-from hidden></div>
     <div class="kpis" data-kpis></div>
     <div id="rSummary" class="summary" hidden></div>
     <div id="rBody" class="rgrid"></div>
@@ -163,12 +186,58 @@
       <div class="cardhead"><h3>Verifică copia rapidă cu <code>strategy.py</code> original</h3></div>
       <p class="hint">Rulează <code>verify_entry</code> / <code>verify_exit</code> neschimbate pe lumânări alese din perioada din
         Setări (jumătate cu semnal, restul la întâmplare) și le compară cu semnalele folosite în test. La 1000 de lumânări
-        analizate, funcția originală durează ~7 s pe lumânare.</p>
+        analizate, funcția originală durează ~15 ms pe lumânare.</p>
       <div class="vrow"><label for="vSamples">Lumânări verificate</label>
         <input id="vSamples" type="number" min="2" max="500" value="10">
         <button type="button" id="vGo" class="btn">Verifică</button></div>
       <div id="vOut"></div>
     </section>
+  </section>
+
+  <!-- ===== Optimizare (Optimization results din MT5) ===== -->
+  <section id="tab-opt" class="pane">
+    <!-- În timpul optimizării: generația, testele și cel mai bun set de până acum. -->
+    <section class="card olive" id="oLive" hidden>
+      <div class="olivehead"><span class="pulse"></span><b id="oLiveTitle">Optimizez</b><span id="oLiveSub" class="muted"></span></div>
+      <div class="olivebar"><div id="oLiveBar"></div></div>
+      <div id="oLiveStats" class="olivestats"></div>
+      <div id="oLiveBest" class="olivebest"></div>
+    </section>
+    <!-- Rezultatul: indicatorii, cel mai bun set, graficul și tabelul cu toate testele. -->
+    <div id="oResult" hidden>
+      <div id="oMeta" class="summary"></div>
+      <div id="oKpis" class="kpis okpis"></div>
+      <section class="card obest" id="oBest"></section>
+      <section class="card graphcard">
+        <div class="cardhead">
+          <div class="olegend"><span><i class="dot p"></i>test profitabil</span><span><i class="dot l"></i>test în pierdere</span>
+            <span><i class="ln"></i><b id="oLineName">cel mai bun până atunci</b></span><span><i class="ln dash"></i>depozitul</span></div>
+          <label class="axis">Axa X <select id="oAxis"></select></label>
+        </div>
+        <div class="ographwrap"><canvas id="oCanvas"></canvas><div id="oTip" class="gtip" hidden></div></div>
+      </section>
+      <div class="otools">
+        <div id="oFilter" class="chips small" role="group" aria-label="Filtru"></div>
+        <div class="oper"><span class="muted">Testul complet pe</span>
+          <div id="oPeriod" class="seg small" role="radiogroup" aria-label="Perioada testului complet">
+            <button type="button" data-v="full" class="on">toată perioada</button>
+            <button type="button" data-v="back">optimizare</button>
+            <button type="button" data-v="fwd">forward</button></div></div>
+      </div>
+      <p id="oRunHint" class="orunhint"></p>
+      <section class="card flush"><div class="tablewrap otablewrap" id="oTableWrap"><table id="oTable" class="deals otable"><thead></thead><tbody></tbody></table>
+        <!-- Butoanele rândului de sub mouse (și ale rândului selectat): testul complet pe un anumit modelling. -->
+        <div id="oRowAct" class="rowact" hidden>
+          <button type="button" data-m="open"><svg viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z"/></svg>Open prices</button>
+          <button type="button" data-m="ohlc1"><svg viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z"/></svg>1 min OHLC</button>
+          <button type="button" data-m="real" class="real"><svg viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z"/></svg>Real ticks</button></div></div>
+        <div class="ocount"><span id="oCount"></span><button type="button" id="oCsv" class="btn ghost">Descarcă CSV</button></div></section>
+    </div>
+    <div class="empty" id="oEmpty"><svg viewBox="0 0 16 16"><circle cx="4" cy="11" r="1.4"/><circle cx="8" cy="6" r="1.4"/><circle cx="12" cy="9" r="1.4"/></svg>
+      <p>Nicio optimizare încă.</p>
+      <ol class="steps muted"><li>În <b>Setări → Optimizare</b> alege <b>Genetică</b> sau <b>Completă</b>.</li>
+        <li>În <b>Parametri</b> bifează parametrii și alege Start, Pas și Stop.</li>
+        <li>Apasă <b>Start</b>. Clic pe un rând din rezultate rulează testul complet cu acei parametri.</li></ol></div>
   </section>
 
   <!-- ===== Tranzacții (deals) ===== -->
